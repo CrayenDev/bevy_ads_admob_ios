@@ -1,0 +1,27 @@
+# Generated swift-bridge files
+/generated
+*.generated.swift
+*.generated.h
+/AdmobXcframework.xcframework/ios-arm*
+# Rust build artifacts
+/target/
+Cargo.lock
+/.swiftpm
+
+# Swift build artifacts
+.build/
+Package.resolved
+*.xcodeproj/
+*.xcworkspace/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+Sources/bevy_ads_admob/SwiftBridgeCore.swift
+Sources/bevy_ads_admob/bevy_ads_admob.swift

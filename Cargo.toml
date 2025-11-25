@@ -1,0 +1,30 @@
+[package]
+name = "bevy_ads_admob"
+version = "0.1.0"
+edition = "2024"
+authors = ["Piotr Siuszko"]
+keywords = ["bevy", "ads", "mobile", "admob"]
+description = "Bevy Admob integration for iOS"
+homepage = "https://github.com/CrayenDev/bevy_ads_admob"
+repository = "https://github.com/CrayenDev/bevy_ads_admob"
+license = "MIT"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[dependencies]
+bevy_ads_common = { path = "crates/bevy_ads_common", version = "0.1.0" }
+serde = {version = "1.0.152", features = ["derive"]}
+bevy_app = { version = "0.17.0" }
+bevy_ecs = { version = "0.17.0" }
+bevy_reflect = { version = "0.17.0" }
+bevy_derive = { version = "0.17.0" }
+bevy_log = { version = "0.17.0" }
+swift-bridge = "0.1"
+
+[build-dependencies]
+swift-bridge-build = "0.1"
