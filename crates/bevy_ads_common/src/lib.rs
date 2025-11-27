@@ -43,7 +43,7 @@ pub trait AdManager {
             AdType::Rewarded => self.load_rewarded(ad_id),
         }
     }
-    fn show_ad(&self, ad_type: AdType) -> bool {
+    fn show_ad(&mut self, ad_type: AdType) -> bool {
         if !self.is_ad_ready(ad_type) {
             return false;
         }
@@ -53,7 +53,7 @@ pub trait AdManager {
             AdType::Rewarded => self.show_rewarded(),
         }
     }
-    fn hide_ad(&self, ad_type: AdType) -> bool {
+    fn hide_ad(&mut self, ad_type: AdType) -> bool {
         match ad_type {
             AdType::Banner => self.hide_banner(),
             AdType::Interstitial => self.hide_interstitial(),
@@ -67,11 +67,11 @@ pub trait AdManager {
             AdType::Rewarded => self.is_rewarded_ready(),
         }
     }
-    fn show_banner(&self) -> bool;
-    fn show_interstitial(&self) -> bool;
-    fn show_rewarded(&self) -> bool;
-    fn hide_banner(&self) -> bool;
-    fn hide_interstitial(&self) -> bool;
+    fn show_banner(&mut self) -> bool;
+    fn show_interstitial(&mut self) -> bool;
+    fn show_rewarded(&mut self) -> bool;
+    fn hide_banner(&mut self) -> bool;
+    fn hide_interstitial(&mut self) -> bool;
     fn hide_rewarded(&self) -> bool;
     fn load_banner(&self, ad_id: &str) -> bool;
     fn load_interstitial(&self, ad_id: &str) -> bool;
@@ -90,6 +90,8 @@ impl Plugin for AdBasePlugin {
         app.add_message::<AdMessage>()
             .add_systems(FixedUpdate, handle_events)
             .register_type::<AdMessage>();
+        #[cfg(feature = "fake_ads")]
+        app.add_plugins(fake_ads::plugin);
     }
 }
 

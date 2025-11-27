@@ -60,7 +60,7 @@ impl bevy_ads_common::AdManager for AdMobManager {
         self.initialized
     }
 
-    fn show_banner(&self) -> bool {
+    fn show_banner(&mut self) -> bool {
         if !self.initialized {
             bevy_log::info!("AdMob not initialized");
             return false;
@@ -77,7 +77,7 @@ impl bevy_ads_common::AdManager for AdMobManager {
         }
     }
 
-    fn show_interstitial(&self) -> bool {
+    fn show_interstitial(&mut self) -> bool {
         if !self.initialized {
             bevy_log::info!("AdMob not initialized");
             return false;
@@ -94,7 +94,7 @@ impl bevy_ads_common::AdManager for AdMobManager {
         }
     }
 
-    fn show_rewarded(&self) -> bool {
+    fn show_rewarded(&mut self) -> bool {
         if !self.initialized {
             bevy_log::info!("AdMob not initialized");
             return false;
@@ -111,7 +111,7 @@ impl bevy_ads_common::AdManager for AdMobManager {
         }
     }
 
-    fn hide_banner(&self) -> bool {
+    fn hide_banner(&mut self) -> bool {
         if !self.initialized {
             bevy_log::info!("AdMob not initialized");
             return false;
@@ -128,7 +128,7 @@ impl bevy_ads_common::AdManager for AdMobManager {
         }
     }
 
-    fn hide_interstitial(&self) -> bool {
+    fn hide_interstitial(&mut self) -> bool {
         todo!()
     }
 
