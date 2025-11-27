@@ -113,8 +113,9 @@ fn show_ads(
     mut commands: Commands,
 ) {
     for (entity, mut component) in q.iter_mut() {
-        if component.0.tick(time.delta()).just_finished() {
-            commands.entity(entity).despawn();
+        component.0.tick(time.delta());
+        if component.0.is_finished() {
+            commands.entity(entity).try_despawn();
             match component.1 {
                 AdType::Banner => {}
                 AdType::Interstitial => {
@@ -147,15 +148,15 @@ fn ad_bundle(duration_ms: u64, ad_type: AdType) -> impl Bundle {
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(10.0),
             position_type: PositionType::Absolute,
+
             ..Default::default()
         },
+        MockupAdComponent(
+            bevy_time::Timer::new(Duration::from_millis(duration_ms), TimerMode::Once),
+            ad_type,
+        ),
+        bevy_ui::ZIndex(500),
         BackgroundColor(bevy_color::palettes::tailwind::BLUE_400.into()),
-        children![
-            Text::new("Mockup Ads"),
-            MockupAdComponent(
-                bevy_time::Timer::new(Duration::from_millis(duration_ms), TimerMode::Once),
-                ad_type
-            )
-        ],
+        children![Text::new("Mockup Ads")],
     )
 }
