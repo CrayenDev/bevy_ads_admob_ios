@@ -6,6 +6,7 @@ use bevy_ecs::{
     children,
     component::Component,
     entity::Entity,
+    query::With,
     resource::Resource,
     spawn::SpawnRelated,
     system::{Commands, Query, Res, ResMut, SystemParam},
@@ -43,6 +44,9 @@ pub(crate) fn plugin(app: &mut App) {
 
 #[derive(Component, Reflect)]
 pub struct MockupAdComponent(pub bevy_time::Timer, pub AdType);
+
+#[derive(Component, Reflect)]
+pub struct MockupAdText;
 
 #[derive(SystemParam)]
 pub struct MockupAdsSystem<'w, 's> {
@@ -109,6 +113,7 @@ impl AdManager for MockupAdsSystem<'_, '_> {
 
 fn show_ads(
     mut q: Query<(Entity, &mut MockupAdComponent)>,
+    mut qq: Query<&mut Text, With<MockupAdText>>,
     time: Res<Time>,
     mut commands: Commands,
 ) {
@@ -132,6 +137,10 @@ fn show_ads(
                         reward_type: "Reward".to_string(),
                     });
                 }
+            }
+        } else {
+            for mut text in qq.iter_mut() {
+                text.0 = format!("{:.2}s left", component.0.remaining_secs());
             }
         }
     }
@@ -157,6 +166,6 @@ fn ad_bundle(duration_ms: u64, ad_type: AdType) -> impl Bundle {
         ),
         bevy_ui::ZIndex(500),
         BackgroundColor(bevy_color::palettes::tailwind::BLUE_400.into()),
-        children![Text::new("Mockup Ads")],
+        children![Text::new("Mockup Ads"), (Text::new(""), MockupAdText)],
     )
 }
