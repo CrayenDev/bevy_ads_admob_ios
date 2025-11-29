@@ -10,7 +10,7 @@ pub mod native;
 pub use native::AdMobNative;
 
 /// AdMob configuration
-#[derive(Resource, Debug, Clone, Reflect, Serialize, Deserialize, Default)]
+#[derive(Resource, Debug, Clone, Reflect, Serialize, Deserialize)]
 pub struct AdMobConfig {
     pub banner_ad_unit_id: String,
     pub interstitial_ad_unit_id: String,
@@ -18,6 +18,19 @@ pub struct AdMobConfig {
     pub load_ad_on_init: Option<AdType>,
     pub banner_width: i32,
     pub banner_height: i32,
+}
+
+impl Default for AdMobConfig {
+    fn default() -> Self {
+        Self {
+            banner_height: 50,
+            banner_width: 150,
+            rewarded_ad_unit_id: "ca-app-pub-3940256099942544/5354046379".to_string(),
+            banner_ad_unit_id: "ca-app-pub-3940256099942544/9214589741".to_string(),
+            interstitial_ad_unit_id: "ca-app-pub-3940256099942544/1033173712".to_string(),
+            load_ad_on_init: None,
+        }
+    }
 }
 
 impl AdMobConfig {
