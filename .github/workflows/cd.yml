@@ -20,6 +20,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Build
         run: just build-release
+      - name: Zip
+        run: just zip
       - name: Push
         if: inputs.publish == true
         uses: s0/git-publish-subdir-action@develop
