@@ -1,4 +1,4 @@
-# Bevy AdMob Integration
+# Bevy AdMob iOS Integration
 
 This crate provides AdMob integration for Bevy applications on iOS through swift-bridge.
 

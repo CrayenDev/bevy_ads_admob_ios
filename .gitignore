@@ -23,5 +23,5 @@ Package.resolved
 
 # macOS
 .DS_Store
-Sources/bevy_ads_admob/SwiftBridgeCore.swift
-Sources/bevy_ads_admob/bevy_ads_admob.swift
+Sources/bevy_ads_admob_ios/SwiftBridgeCore.swift
+Sources/bevy_ads_admob_ios/bevy_ads_admob_ios.swift

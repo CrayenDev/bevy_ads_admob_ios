@@ -1,6 +1,6 @@
 use bevy_ads_common::{AdManager, AdMessage, AdType};
 use bevy_app::{App, Plugin, Update};
-use bevy_ecs::prelude::*;
+use bevy_ecs::{prelude::*, system::SystemParam};
 use bevy_reflect::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -16,33 +16,68 @@ pub struct AdMobConfig {
     pub interstitial_ad_unit_id: String,
     pub rewarded_ad_unit_id: String,
     pub load_ad_on_init: Option<AdType>,
+    pub banner_width: i32,
+    pub banner_height: i32,
+}
+
+impl AdMobConfig {
+    /// Get the ad unit ID for the given ad type
+    pub fn get_ad_unit_id(&self, ad_type: AdType) -> String {
+        match ad_type {
+            AdType::Banner => self.banner_ad_unit_id.clone(),
+            AdType::Interstitial => self.interstitial_ad_unit_id.clone(),
+            AdType::Rewarded => self.rewarded_ad_unit_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum InitStatus {
+    #[default]
+    NotInitialized,
+    Initializing,
+    Initialized,
+    Failed,
 }
 
 #[allow(unused, reason = "Variables are used on some of the platforms")]
 /// AdMob manager resource
 #[derive(Resource)]
 pub struct AdMobManager {
-    initialized: bool,
-    banner_width: i32,
-    banner_height: i32,
+    init_status: InitStatus,
+}
+
+impl AdMobManager {
+    pub fn is_initialized(&self) -> bool {
+        self.init_status == InitStatus::Initialized
+    }
 }
 
 impl Default for AdMobManager {
     fn default() -> Self {
         Self {
-            initialized: false,
-            banner_width: 320,
-            banner_height: 50,
+            init_status: InitStatus::NotInitialized,
         }
     }
+}
+
+#[derive(SystemParam)]
+pub struct AdmobAdsSystem<'w, 's> {
+    pub r: NonSendMut<'w, AdMobManager>,
+    pub cfg: Res<'w, AdMobConfig>,
+    pub cmd: Commands<'w, 's>,
 }
 
 #[allow(
     unused_variables,
     reason = "Variables are used on some of the platforms"
 )]
-impl bevy_ads_common::AdManager for AdMobManager {
+impl bevy_ads_common::AdManager for AdmobAdsSystem<'_, '_> {
     fn initialize(&mut self) -> bool {
+        if self.r.init_status.eq(&InitStatus::Initializing) {
+            bevy_log::info!("Initializing AdMob already in progress");
+            return false;
+        }
         bevy_log::info!("Initializing AdMob");
         #[cfg(target_os = "ios")]
         {
@@ -52,16 +87,16 @@ impl bevy_ads_common::AdManager for AdMobManager {
         #[cfg(not(target_os = "ios"))]
         {
             bevy_log::info!("AdMob initialization skipped - not running on iOS");
-            self.initialized = true;
+            self.r.init_status = InitStatus::Initialized;
             true
         }
     }
     fn is_initialized(&self) -> bool {
-        self.initialized
+        self.r.is_initialized()
     }
 
     fn show_banner(&mut self) -> bool {
-        if !self.initialized {
+        if !self.is_initialized() {
             bevy_log::info!("AdMob not initialized");
             return false;
         }
@@ -78,7 +113,7 @@ impl bevy_ads_common::AdManager for AdMobManager {
     }
 
     fn show_interstitial(&mut self) -> bool {
-        if !self.initialized {
+        if !self.is_initialized() {
             bevy_log::info!("AdMob not initialized");
             return false;
         }
@@ -95,7 +130,7 @@ impl bevy_ads_common::AdManager for AdMobManager {
     }
 
     fn show_rewarded(&mut self) -> bool {
-        if !self.initialized {
+        if !self.is_initialized() {
             bevy_log::info!("AdMob not initialized");
             return false;
         }
@@ -112,7 +147,7 @@ impl bevy_ads_common::AdManager for AdMobManager {
     }
 
     fn hide_banner(&mut self) -> bool {
-        if !self.initialized {
+        if !self.is_initialized() {
             bevy_log::info!("AdMob not initialized");
             return false;
         }
@@ -129,18 +164,20 @@ impl bevy_ads_common::AdManager for AdMobManager {
     }
 
     fn hide_interstitial(&mut self) -> bool {
-        todo!()
+        false
     }
 
-    fn hide_rewarded(&self) -> bool {
-        todo!()
+    fn hide_rewarded(&mut self) -> bool {
+        false
     }
 
-    fn load_banner(&self, ad_id: &str) -> bool {
+    fn load_banner(&mut self, ad_id: &str) -> bool {
         #[cfg(target_os = "ios")]
         {
+            let banner_width = self.get_banner_width(ad_id);
+            let banner_height = self.get_banner_height(ad_id);
             native::ADMOB_NATIVE
-                .with_borrow_mut(|f| f.load_banner_ad(ad_id, self.banner_width, self.banner_height))
+                .with_borrow_mut(|f| f.load_banner_ad(ad_id, banner_width, banner_height))
         }
         #[cfg(not(target_os = "ios"))]
         {
@@ -149,8 +186,8 @@ impl bevy_ads_common::AdManager for AdMobManager {
         }
     }
 
-    fn load_interstitial(&self, ad_id: &str) -> bool {
-        if !self.initialized {
+    fn load_interstitial(&mut self, ad_id: &str) -> bool {
+        if !self.is_initialized() {
             bevy_log::info!("AdMob not initialized");
             return false;
         }
@@ -166,8 +203,8 @@ impl bevy_ads_common::AdManager for AdMobManager {
         }
     }
 
-    fn load_rewarded(&self, ad_id: &str) -> bool {
-        if !self.initialized {
+    fn load_rewarded(&mut self, ad_id: &str) -> bool {
+        if !self.is_initialized() {
             bevy_log::info!("AdMob not initialized");
             return false;
         }
@@ -183,7 +220,8 @@ impl bevy_ads_common::AdManager for AdMobManager {
     }
 
     fn is_interstitial_ready(&self) -> bool {
-        if !self.initialized {
+        if !self.is_initialized() {
+            bevy_log::info!("AdMob not initialized");
             return false;
         }
 
@@ -198,7 +236,8 @@ impl bevy_ads_common::AdManager for AdMobManager {
     }
 
     fn is_rewarded_ready(&self) -> bool {
-        if !self.initialized {
+        if !self.is_initialized() {
+            bevy_log::info!("AdMob not initialized");
             return false;
         }
 
@@ -211,14 +250,20 @@ impl bevy_ads_common::AdManager for AdMobManager {
             true
         }
     }
+    fn get_banner_height(&self, _ad_id: &str) -> i32 {
+        self.cfg.banner_height
+    }
+    fn get_banner_width(&self, _ad_id: &str) -> i32 {
+        self.cfg.banner_width
+    }
 }
 
 /// System to initialize AdMob when the plugin starts
 fn initialize_admob(
-    mut manager: NonSendMut<AdMobManager>,
+    mut manager: AdmobAdsSystem,
     // _non_send_marker: bevy_ecs::system::NonSendMarker,
 ) {
-    if !manager.initialized {
+    if !manager.is_initialized() {
         let success = manager.initialize();
         bevy_log::info!("AdMob started init {}", success);
     }
@@ -226,21 +271,21 @@ fn initialize_admob(
 
 fn on_admob_initialized(
     mut reader: MessageReader<AdMessage>,
-    mut manager: NonSendMut<AdMobManager>,
-    cfg: Res<AdMobConfig>,
+    mut manager: AdmobAdsSystem,
     _non_send_marker: bevy_ecs::system::NonSendMarker,
 ) {
     for event in reader.read() {
-        if let AdMessage::Initialized { success } = event
-            && *success
-        {
-            manager.initialized = true;
-            if let Some(ad_type) = cfg.load_ad_on_init {
-                match ad_type {
-                    AdType::Banner => manager.load_banner(&cfg.banner_ad_unit_id),
-                    AdType::Interstitial => manager.load_interstitial(&cfg.interstitial_ad_unit_id),
-                    AdType::Rewarded => manager.load_rewarded(&cfg.rewarded_ad_unit_id),
-                };
+        if let AdMessage::Initialized { success } = event {
+            manager.r.init_status = if *success {
+                InitStatus::Initialized
+            } else {
+                InitStatus::Failed
+            };
+            if *success {
+                if let Some(ad_type) = manager.cfg.load_ad_on_init {
+                    let ad_unit = manager.cfg.get_ad_unit_id(ad_type);
+                    manager.load_ad(ad_type, &ad_unit);
+                }
             }
         }
     }
@@ -251,8 +296,8 @@ pub struct AdMobPlugin;
 
 impl Plugin for AdMobPlugin {
     fn build(&self, app: &mut App) {
-        if !app.is_plugin_added::<bevy_ads_common::AdBasePlugin>() {
-            app.add_plugins(bevy_ads_common::AdBasePlugin);
+        if !app.is_plugin_added::<bevy_ads_common::AdsCommonPlugin>() {
+            app.add_plugins(bevy_ads_common::AdsCommonPlugin);
         }
         app.init_non_send_resource::<AdMobManager>()
             .add_systems(
