@@ -318,7 +318,8 @@ impl Plugin for AdMobPlugin {
                 initialize_admob.run_if(resource_added::<AdMobConfig>),
             )
             .add_systems(Update, on_admob_initialized)
-            .register_type::<AdMobConfig>();
+            .register_type::<AdMobConfig>()
+            .init_resource::<AdMobConfig>();
     }
 }
 
