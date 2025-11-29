@@ -15,25 +15,23 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(id: "crayen.AdmobXcframework", from: "0.1.0"),
         .package(
             url: "https://github.com/googleads/swift-package-manager-google-mobile-ads.git",
             from: "12.14.0"
-        ),
+        )
     ],
     targets: [
-        // .binaryTarget(
-        //     name: "AdmobXcframework",
-        //     path: "AdmobXcframework.xcframework"),
-
+        .binaryTarget(
+            name: "AdmobXcframework",
+            path: "AdmobXcframework.xcframework"),
         .target(
             name: "bevy_ads_admob_ios",
             dependencies: [
                 // "AdmobXcframework",
-                .product(name: "AdmobXcframework", package: "crayen.AdmobXcframework"),
+                .product(name: "AdmobXcframework", package: "AdmobXcframework"),
                 .product(
                     name: "GoogleMobileAds", package: "swift-package-manager-google-mobile-ads"),
             ],
-        )
+        ),
     ]
 )
