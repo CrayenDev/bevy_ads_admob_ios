@@ -43,3 +43,10 @@ copy_swift:
 clean:
     rm -rf AdmobXcframework.xcframework/ios-arm64
     rm -rf AdmobXcframework.xcframework/ios-arm64_x86_64-simulator
+
+zip:
+    mkdir -p dist
+    zip -r dist/AdmobXcframework.xcframework.zip ./AdmobXcframework.xcframework/
+    ls -lisah dist/AdmobXcframework.xcframework.zip
+    shasum -a 256 dist/AdmobXcframework.xcframework.zip
+    shasum -a 256 dist/AdmobXcframework.xcframework.zip > dist/AdmobXcframework.xcframework.sha256.txt

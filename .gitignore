@@ -1,3 +1,4 @@
+dist/
 # Generated swift-bridge files
 /generated
 *.generated.swift
