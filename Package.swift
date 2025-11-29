@@ -27,8 +27,7 @@ let package = Package(
         .target(
             name: "bevy_ads_admob_ios",
             dependencies: [
-                // "AdmobXcframework",
-                .product(name: "AdmobXcframework", package: "AdmobXcframework"),
+                "AdmobXcframework",
                 .product(
                     name: "GoogleMobileAds", package: "swift-package-manager-google-mobile-ads"),
             ],
