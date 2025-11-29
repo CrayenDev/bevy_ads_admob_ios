@@ -25,7 +25,7 @@ impl Default for AdMobConfig {
         Self {
             banner_height: 50,
             banner_width: 150,
-            rewarded_ad_unit_id: "ca-app-pub-3940256099942544/6978759866".to_string(),
+            rewarded_ad_unit_id: "ca-app-pub-3940256099942544/1712485313".to_string(),
             banner_ad_unit_id: "ca-app-pub-3940256099942544/2435281174".to_string(),
             interstitial_ad_unit_id: "ca-app-pub-3940256099942544/4411468910".to_string(),
             load_ad_on_init: None,
