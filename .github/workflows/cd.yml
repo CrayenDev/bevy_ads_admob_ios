@@ -20,8 +20,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Build
         run: just build-release
-      - name: Zip
-        run: just zip
+      - name: Prepare deployed version
+        run: just make_dist
       - name: Push
         uses: s0/git-publish-subdir-action@develop
         env:

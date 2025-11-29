@@ -44,6 +44,12 @@ clean:
     rm -rf AdmobXcframework.xcframework/ios-arm64
     rm -rf AdmobXcframework.xcframework/ios-arm64_x86_64-simulator
 
+make_dist:
+    mkdir -p dist
+    cp -r AdmobXcframework.xcframework ./dist/
+    cp Package.swift ./dist/Package.swift
+    cp -r Sources ./dist/
+
 zip:
     mkdir -p dist
     zip -r dist/AdmobXcframework.xcframework.zip ./AdmobXcframework.xcframework/
