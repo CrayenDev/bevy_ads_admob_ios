@@ -17,7 +17,7 @@ mod ffi {
         #[swift_bridge(init)]
         fn new() -> AdMobManager;
 
-        fn initialize_admob(self: &AdMobManager) -> bool;
+        fn initialize_admob(self: &AdMobManager, test_device_id: &str) -> bool;
         fn load_banner_ad(self: &AdMobManager, ad_unit_id: &str, width: i32, height: i32) -> bool;
         fn show_banner_ad(self: &AdMobManager) -> bool;
         fn hide_banner_ad(self: &AdMobManager) -> bool;
@@ -101,8 +101,12 @@ impl AdMobNative {
         }
     }
 
-    pub fn initialize(&self) -> bool {
-        self.manager.initialize_admob()
+    pub fn initialize(&self, test_device_id: &Option<String>) -> bool {
+        let id = match test_device_id {
+            Some(id) => id,
+            None => "",
+        };
+        self.manager.initialize_admob(id)
     }
 
     pub fn load_banner_ad(&self, ad_unit_id: &str, width: i32, height: i32) -> bool {

@@ -58,9 +58,16 @@ pub enum InitStatus {
 #[derive(Resource)]
 pub struct AdMobManager {
     init_status: InitStatus,
+    test_device_id: Option<String>,
 }
 
 impl AdMobManager {
+    pub fn new(test_device_id: Option<String>) -> Self {
+        Self {
+            init_status: InitStatus::NotInitialized,
+            test_device_id,
+        }
+    }
     pub fn is_initialized(&self) -> bool {
         self.init_status == InitStatus::Initialized
     }
@@ -70,6 +77,7 @@ impl Default for AdMobManager {
     fn default() -> Self {
         Self {
             init_status: InitStatus::NotInitialized,
+            test_device_id: None,
         }
     }
 }
@@ -92,9 +100,10 @@ impl bevy_ads_common::AdManager for AdmobAdsSystem<'_, '_> {
             return false;
         }
         bevy_log::info!("Initializing AdMob");
+
         #[cfg(target_os = "ios")]
         {
-            native::ADMOB_NATIVE.with_borrow_mut(|f| f.initialize());
+            native::ADMOB_NATIVE.with_borrow_mut(|f| f.initialize(&self.r.test_device_id));
             true
         }
         #[cfg(not(target_os = "ios"))]

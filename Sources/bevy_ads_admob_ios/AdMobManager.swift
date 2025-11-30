@@ -24,41 +24,45 @@ import UserMessagingPlatform
     }
 
     // MARK: - Public Methods
-    @objc public func initialize_admob() -> Bool {
+    @objc public func initialize_admob(test_device_id: RustStr) -> Bool {
         guard !isInitialized else {
             print("AdMob already initialized")
             return true
         }
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            // ConsentInformation.shared.requestConsentInfoUpdate(with: RequestParameters()) {
-            //     requestConsentError in
-            //           guard requestConsentError == nil else {
-            //               print("Error: \(requestConsentError!.localizedDescription)")
-            //               on_consent_gathered(requestConsentError!.localizedDescription)
-            //               return
-            //           }
-            //     Task {
-            //       do {
-            //         try await ConsentForm.loadAndPresentIfRequired(from: nil)
-            //           on_consent_gathered("")
-            //           print("Consent has been gathered")
-            //       } catch {
-            //           on_consent_gathered(error.localizedDescription)
-            //           print("Error: \(error.localizedDescription)")
-            //       }
-            //     }
-            // }
+        let test_id = test_device_id.toString()
+        if !test_id.isEmpty {
             MobileAds.shared.requestConfiguration.testDeviceIdentifiers = [
-                "48999470-6F35-4004-AB5A-378E61F60E93"
+                test_id
             ]
-            MobileAds.shared.start { [weak self] status in
-                self?.isInitialized = true
-                print("AdMob initialized with status: \(status.adapterStatusesByClassName))")
-
-                on_initialized(true)
-            }
         }
+        MobileAds.shared.start { [weak self] status in
+            self?.isInitialized = true
+            print("AdMob initialized with status: \(status.adapterStatusesByClassName))")
+
+            on_initialized(true)
+        }
+        // DispatchQueue.main.async { [weak self] in
+        //     guard let self = self else { return }
+        //     // ConsentInformation.shared.requestConsentInfoUpdate(with: RequestParameters()) {
+        //     //     requestConsentError in
+        //     //           guard requestConsentError == nil else {
+        //     //               print("Error: \(requestConsentError!.localizedDescription)")
+        //     //               on_consent_gathered(requestConsentError!.localizedDescription)
+        //     //               return
+        //     //           }
+        //     //     Task {
+        //     //       do {
+        //     //         try await ConsentForm.loadAndPresentIfRequired(from: nil)
+        //     //           on_consent_gathered("")
+        //     //           print("Consent has been gathered")
+        //     //       } catch {
+        //     //           on_consent_gathered(error.localizedDescription)
+        //     //           print("Error: \(error.localizedDescription)")
+        //     //       }
+        //     //     }
+        //     // }
+
+        // }
         return true
     }
 
