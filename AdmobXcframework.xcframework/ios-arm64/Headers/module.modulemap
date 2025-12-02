@@ -1,0 +1,5 @@
+module AdmobXcframework {
+    header "SwiftBridgeCore.h"
+    header "bevy_ads_admob_ios.h"
+    export *
+}
