@@ -1,6 +1,6 @@
 // swift_bridge import will be used by the generated bridge code
 
-use bevy_ads_common::AdMessage;
+use bevy_ads_common::{AdMessage, AdType};
 use std::cell::RefCell;
 
 thread_local! {
@@ -48,22 +48,34 @@ pub fn on_initialized(success: bool) {
 // Callback functions that Swift can call back into Rust
 pub fn on_ad_loaded(ad_type: String) {
     bevy_log::info!("Ad loaded: {}", ad_type);
-    bevy_ads_common::write_event_to_queue(AdMessage::AdLoaded { ad_type });
+    let ad_type: Option<AdType> = ad_type.as_str().try_into().ok();
+    if let Some(ad_type) = ad_type {
+        bevy_ads_common::write_event_to_queue(AdMessage::AdLoaded { ad_type });
+    }
 }
 
 pub fn on_ad_failed_to_load(ad_type: String, error: String) {
     bevy_log::info!("Ad failed to load: {} - {}", ad_type, error);
-    bevy_ads_common::write_event_to_queue(AdMessage::AdFailedToLoad { ad_type, error });
+    let ad_type: Option<AdType> = ad_type.as_str().try_into().ok();
+    if let Some(ad_type) = ad_type {
+        bevy_ads_common::write_event_to_queue(AdMessage::AdFailedToLoad { ad_type, error });
+    }
 }
 
 pub fn on_ad_opened(ad_type: String) {
     bevy_log::info!("Ad opened: {}", ad_type);
-    bevy_ads_common::write_event_to_queue(AdMessage::AdLoaded { ad_type });
+    let ad_type: Option<AdType> = ad_type.as_str().try_into().ok();
+    if let Some(ad_type) = ad_type {
+        bevy_ads_common::write_event_to_queue(AdMessage::AdOpened { ad_type });
+    }
 }
 
 pub fn on_ad_closed(ad_type: String) {
     bevy_log::info!("Ad closed: {}", ad_type);
-    bevy_ads_common::write_event_to_queue(AdMessage::AdClosed { ad_type });
+    let ad_type: Option<AdType> = ad_type.as_str().try_into().ok();
+    if let Some(ad_type) = ad_type {
+        bevy_ads_common::write_event_to_queue(AdMessage::AdClosed { ad_type });
+    }
 }
 
 pub fn on_rewarded_ad_earned_reward(amount: i32, reward_type: String) {
