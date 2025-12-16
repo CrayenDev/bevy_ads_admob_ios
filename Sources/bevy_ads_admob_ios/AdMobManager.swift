@@ -1,4 +1,6 @@
+import AdSupport
 import AdmobXcframework
+import AppTrackingTransparency
 import Foundation
 import GoogleMobileAds
 import UIKit
@@ -10,6 +12,11 @@ import UserMessagingPlatform
     }
     var isPrivacyOptionsRequired: Bool {
         return ConsentInformation.shared.privacyOptionsRequirementStatus == .required
+    }
+
+    // Helper computed property to check if ads can be loaded
+    private var canLoadAds: Bool {
+        return isInitialized && canRequestAds
     }
 
     // MARK: - Properties
@@ -29,46 +36,158 @@ import UserMessagingPlatform
             print("AdMob already initialized")
             return true
         }
+
+        if #available(iOS 14, *) {
+            ATTrackingManager.requestTrackingAuthorization { status in
+                switch status {
+                case .authorized:
+                    // Tracking authorization dialog was shown
+                    // and we are authorized
+                    print("Authorized to ads")
+
+                    // Now that we are authorized we can get the IDFA
+                    print(ASIdentifierManager.shared().advertisingIdentifier)
+                case .denied:
+                    // Tracking authorization dialog was
+                    // shown and permission is denied
+                    print("ads Denied")
+                case .notDetermined:
+                    // Tracking authorization dialog has not been shown
+                    print("ADS Not Determined")
+                case .restricted:
+                    print("ADS Restricted")
+
+                @unknown default:
+                    print("ADS Unknown")
+                }
+            }
+        }
+        // ConsentInformation.shared.reset()
+        let parameters = RequestParameters()
         let test_id = test_device_id.toString()
+        print("Admob setup test device: \(test_id)")
+        let debugSettings = DebugSettings()
+        debugSettings.geography = .EEA
         if !test_id.isEmpty {
             MobileAds.shared.requestConfiguration.testDeviceIdentifiers = [
                 test_id
             ]
+            // For testing purposes, you can use UMPDebugGeography to simulate a location.
+            debugSettings.testDeviceIdentifiers = [test_id]
+            print("Admob debug setup")
         }
-        MobileAds.shared.start { [weak self] status in
-            self?.isInitialized = true
-            print("AdMob initialized with status: \(status.adapterStatusesByClassName))")
 
-            on_initialized(true)
+        parameters.debugSettings = debugSettings
+
+        print("Called init admob, can request \(self.canRequestAds)")
+        if self.canRequestAds {
+            self.init_ads_system()
+            return true
         }
-        // DispatchQueue.main.async { [weak self] in
-        //     guard let self = self else { return }
-        //     // ConsentInformation.shared.requestConsentInfoUpdate(with: RequestParameters()) {
-        //     //     requestConsentError in
-        //     //           guard requestConsentError == nil else {
-        //     //               print("Error: \(requestConsentError!.localizedDescription)")
-        //     //               on_consent_gathered(requestConsentError!.localizedDescription)
-        //     //               return
-        //     //           }
-        //     //     Task {
-        //     //       do {
-        //     //         try await ConsentForm.loadAndPresentIfRequired(from: nil)
-        //     //           on_consent_gathered("")
-        //     //           print("Consent has been gathered")
-        //     //       } catch {
-        //     //           on_consent_gathered(error.localizedDescription)
-        //     //           print("Error: \(error.localizedDescription)")
-        //     //       }
-        //     //     }
-        //     // }
 
-        // }
+        // Always request consent info update first
+        DispatchQueue.main.async {
+            // Get the root view controller
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                let window = windowScene.windows.first,
+                let rootViewController = window.rootViewController
+            else {
+                print("Could not get root view controller for consent ads admob")
+                on_initialized(false)
+                return
+            }
+            // [START request_consent_info_update]
+            // Requesting an update to consent information should be called on every app launch.
+            ConsentInformation.shared.requestConsentInfoUpdate(with: parameters) {
+                requestConsentError in
+                // [START_EXCLUDE]
+                guard requestConsentError == nil else {
+                    print(
+                        "Error requesting consent for ads info update: \(requestConsentError!.localizedDescription)"
+                    )
+                    on_initialized(false)
+                    return
+                }
+                print(
+                    "Consent for ads info updated. canRequestAds: \(self.canRequestAds), formStatus: \(ConsentInformation.shared.consentStatus.rawValue)"
+                )
+
+                // Check if we can already request ads (consent previously given)
+                if self.canRequestAds {
+                    print("Can request ads - initializing immediately")
+                    self.init_ads_system()
+                } else if ConsentInformation.shared.consentStatus == .required {
+                    // Need to show consent form
+                    print("Consent for ads required - loading and presenting form")
+
+                    Task { @MainActor in
+                        do {
+                            try await ConsentForm.loadAndPresentIfRequired(from: rootViewController)
+
+                            // After consent form, check if we can request ads
+                            print(
+                                "Consent form for ads completed. canRequestAds: \(self.canRequestAds)"
+                            )
+
+                            if self.canRequestAds {
+                                print("User consent granted - initializing ads")
+                                self.init_ads_system()
+                            } else {
+                                print("User consent not granted for ads")
+                                on_initialized(false)
+                            }
+                        } catch {
+                            print(
+                                "Error loading/presenting consent form for ads: \(error.localizedDescription)"
+                            )
+                            on_initialized(false)
+                        }
+                    }
+                } else {
+                    // Consent not required and can't request ads - edge case
+                    print(
+                        "Consent not required but can't request ads - consent status: \(ConsentInformation.shared.consentStatus.rawValue)"
+                    )
+                    on_initialized(false)
+                }
+            }
+        }
         return true
     }
 
+    /// Helper method to call the UMP SDK method to present the privacy options form.
+    @MainActor func presentPrivacyOptionsForm(from viewController: UIViewController? = nil)
+        async throws
+    {
+        try await ConsentForm.presentPrivacyOptionsForm(from: viewController)
+    }
+
+    func init_ads_system() {
+        // Ensure we're on the main thread
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.init_ads_system()
+            }
+            return
+        }
+        print("Starting ads admob initialization...")
+        MobileAds.shared.start { [weak self] status in
+            self?.isInitialized = true
+            print("AdMob initialized with status: \(status.adapterStatusesByClassName)")
+            print("Can request ads after init: \(self?.canRequestAds ?? false)")
+
+            on_initialized(true)
+        }
+
+    }
+
     @objc public func load_banner_ad(ad_unit_id: RustStr, width: Int32, height: Int32) -> Bool {
-        guard isInitialized else {
-            print("AdMob not initialized")
+        guard canLoadAds else {
+            if !isInitialized {
+                print("AdMob not initialized")
+            } else if !canRequestAds {
+                print("Cannot request ads - consent not granted")
+            }
             return false
         }
 
@@ -139,8 +258,12 @@ import UserMessagingPlatform
     }
 
     @objc public func load_interstitial_ad(ad_unit_id: RustStr) -> Bool {
-        guard isInitialized else {
-            print("AdMob not initialized")
+        guard canLoadAds else {
+            if !isInitialized {
+                print("AdMob not initialized")
+            } else if !canRequestAds {
+                print("Cannot request ads - consent not granted")
+            }
             return false
         }
 
@@ -181,8 +304,12 @@ import UserMessagingPlatform
     }
 
     @objc public func load_rewarded_ad(ad_unit_id: RustStr) -> Bool {
-        guard isInitialized else {
-            print("AdMob not initialized")
+        guard canLoadAds else {
+            if !isInitialized {
+                print("AdMob not initialized")
+            } else if !canRequestAds {
+                print("Cannot request ads - consent not granted")
+            }
             return false
         }
 

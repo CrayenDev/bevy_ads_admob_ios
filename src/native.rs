@@ -113,7 +113,7 @@ impl AdMobNative {
         }
     }
 
-    pub fn initialize(&self, test_device_id: &Option<String>) -> bool {
+    pub fn initialize(&self, test_device_id: Option<&str>) -> bool {
         let id = match test_device_id {
             Some(id) => id,
             None => "",

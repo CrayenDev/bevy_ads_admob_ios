@@ -16,6 +16,7 @@ pub struct AdMobConfig {
     pub interstitial_ad_unit_id: String,
     pub rewarded_ad_unit_id: String,
     pub load_ad_on_init: Option<AdType>,
+    pub test_device_id: Option<String>,
     pub banner_width: i32,
     pub banner_height: i32,
 }
@@ -29,6 +30,7 @@ impl Default for AdMobConfig {
             banner_ad_unit_id: "ca-app-pub-3940256099942544/2435281174".to_string(),
             interstitial_ad_unit_id: "ca-app-pub-3940256099942544/4411468910".to_string(),
             load_ad_on_init: None,
+            test_device_id: None,
         }
     }
 }
@@ -41,6 +43,17 @@ impl AdMobConfig {
             AdType::Interstitial => self.interstitial_ad_unit_id.clone(),
             AdType::Rewarded => self.rewarded_ad_unit_id.clone(),
         }
+    }
+
+    pub fn try_get_ad_to_load_on_init(&self) -> Option<(String, AdType)> {
+        self.load_ad_on_init.map(|ad_type| {
+            let ad_unit = self.get_ad_unit_id(ad_type);
+            (ad_unit, ad_type)
+        })
+    }
+
+    pub fn set_test_device_id(&mut self, device_id: impl Into<String>) {
+        self.test_device_id = Some(device_id.into());
     }
 }
 
@@ -58,16 +71,9 @@ pub enum InitStatus {
 #[derive(Resource)]
 pub struct AdMobManager {
     init_status: InitStatus,
-    test_device_id: Option<String>,
 }
 
 impl AdMobManager {
-    pub fn new(test_device_id: Option<String>) -> Self {
-        Self {
-            init_status: InitStatus::NotInitialized,
-            test_device_id,
-        }
-    }
     pub fn is_initialized(&self) -> bool {
         self.init_status == InitStatus::Initialized
     }
@@ -77,7 +83,6 @@ impl Default for AdMobManager {
     fn default() -> Self {
         Self {
             init_status: InitStatus::NotInitialized,
-            test_device_id: None,
         }
     }
 }
@@ -85,8 +90,18 @@ impl Default for AdMobManager {
 #[derive(SystemParam)]
 pub struct AdmobAdsSystem<'w, 's> {
     pub r: NonSendMut<'w, AdMobManager>,
-    pub cfg: Res<'w, AdMobConfig>,
+    pub cfg: Option<Res<'w, AdMobConfig>>,
     pub cmd: Commands<'w, 's>,
+}
+
+impl AdmobAdsSystem<'_, '_> {
+    pub fn load_ad_type(&mut self, ad_type: AdType) -> bool {
+        let Some(config) = &self.cfg else {
+            return false;
+        };
+        let ad_unit = config.get_ad_unit_id(ad_type);
+        self.load_ad(ad_type, &ad_unit)
+    }
 }
 
 #[allow(
@@ -95,6 +110,10 @@ pub struct AdmobAdsSystem<'w, 's> {
 )]
 impl bevy_ads_common::AdManager for AdmobAdsSystem<'_, '_> {
     fn initialize(&mut self) -> bool {
+        if self.cfg.is_none() {
+            bevy_log::error!("AdMob configuration not provided");
+            return false;
+        }
         if self.r.init_status.eq(&InitStatus::Initializing) {
             bevy_log::info!("Initializing AdMob already in progress");
             return false;
@@ -103,7 +122,11 @@ impl bevy_ads_common::AdManager for AdmobAdsSystem<'_, '_> {
 
         #[cfg(target_os = "ios")]
         {
-            native::ADMOB_NATIVE.with_borrow_mut(|f| f.initialize(&self.r.test_device_id));
+            let device_id = match &self.cfg {
+                Some(cfg) => cfg.test_device_id.clone(),
+                None => None,
+            };
+            native::ADMOB_NATIVE.with_borrow_mut(|f| f.initialize(device_id.as_deref()));
             true
         }
         #[cfg(not(target_os = "ios"))]
@@ -273,10 +296,16 @@ impl bevy_ads_common::AdManager for AdmobAdsSystem<'_, '_> {
         }
     }
     fn get_banner_height(&self, _ad_id: &str) -> i32 {
-        self.cfg.banner_height
+        match &self.cfg {
+            Some(c) => c.banner_height,
+            None => 100,
+        }
     }
     fn get_banner_width(&self, _ad_id: &str) -> i32 {
-        self.cfg.banner_width
+        match &self.cfg {
+            Some(c) => c.banner_width,
+            None => 100,
+        }
     }
 }
 
@@ -303,11 +332,16 @@ fn on_admob_initialized(
             } else {
                 InitStatus::Failed
             };
+            bevy_log::info!("AdMob initialized, success: {}", success);
             if *success {
-                if let Some(ad_type) = manager.cfg.load_ad_on_init {
-                    let ad_unit = manager.cfg.get_ad_unit_id(ad_type);
-                    manager.load_ad(ad_type, &ad_unit);
-                }
+                let Some(config) = &manager.cfg else {
+                    continue;
+                };
+                let Some((ad, ad_type)) = config.try_get_ad_to_load_on_init() else {
+                    continue;
+                };
+
+                manager.load_ad(ad_type, &ad);
             }
         }
     }
@@ -327,8 +361,8 @@ impl Plugin for AdMobPlugin {
                 initialize_admob.run_if(resource_added::<AdMobConfig>),
             )
             .add_systems(Update, on_admob_initialized)
-            .register_type::<AdMobConfig>()
-            .init_resource::<AdMobConfig>();
+            .register_type::<AdMobConfig>();
+        // .init_resource::<AdMobConfig>();
     }
 }
 
