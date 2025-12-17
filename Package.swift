@@ -5,7 +5,7 @@ import PackageDescription
 
 let package = Package(
     name: "bevy_ads_admob_ios",
-    platforms: [.iOS(.v12)],
+    platforms: [.iOS(.v13)],
     products: [
         .library(
             name: "bevy_ads_admob_ios",
