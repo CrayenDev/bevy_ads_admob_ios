@@ -1,0 +1,47 @@
+// swift-tools-version: 5.9
+// The swift-tools-version declares the minimum version of Swift required to build this package.
+
+import PackageDescription
+
+let package = Package(
+    name: "bevy_ads_admob_ios",
+    platforms: [.iOS(.v13)],
+    products: [
+        .library(
+            name: "bevy_ads_admob_ios",
+            targets: ["bevy_ads_admob_ios"]
+        )
+    ],
+    dependencies: [
+        .package(
+            url: "https://github.com/googleads/swift-package-manager-google-mobile-ads.git",
+            from: "12.14.0"
+        ),
+        .package(
+            url:
+                "https://github.com/googleads/swift-package-manager-google-user-messaging-platform.git",
+            from: "3.1.0"
+        ),
+
+    ],
+    targets: [
+        .binaryTarget(
+            name: "AdmobXcframework",
+            path: "AdmobXcframework.xcframework"),
+        .target(
+            name: "bevy_ads_admob_ios",
+            dependencies: [
+                "AdmobXcframework",
+                .product(
+                    name: "GoogleMobileAds", package: "swift-package-manager-google-mobile-ads"),
+                .product(
+                    name: "GoogleUserMessagingPlatform",
+                    package: "swift-package-manager-google-user-messaging-platform"),
+            ],
+            linkerSettings: [
+                .linkedFramework("AppTrackingTransparency"),
+                .linkedFramework("AdSupport"),
+            ],
+        ),
+    ]
+)
