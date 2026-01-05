@@ -31,6 +31,39 @@ import UserMessagingPlatform
     }
 
     // MARK: - Public Methods
+    @objc public func is_privacy_options_required() -> Bool {
+        return isPrivacyOptionsRequired
+    }
+
+    @objc public func show_privacy_options_form() -> Bool {
+        guard isPrivacyOptionsRequired else {
+            print("Privacy options form is not required.")
+            return false
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                let window = windowScene.windows.first,
+                let rootViewController = window.rootViewController
+            else {
+                print("Could not get root view controller for privacy options form.")
+                return
+            }
+
+            Task { @MainActor in
+                do {
+                    try await self.presentPrivacyOptionsForm(from: rootViewController)
+                } catch {
+                    print("Error presenting privacy options form: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        return true
+    }
+
     @objc public func initialize_admob(test_device_id: RustStr) -> Bool {
         guard !isInitialized else {
             print("AdMob already initialized")
@@ -122,7 +155,7 @@ import UserMessagingPlatform
 
                     Task { @MainActor in
                         do {
-                            try await ConsentForm.loadAndPresentIfRequired(from: rootViewController)
+                            try await self.presentPrivacyOptionsForm(from: rootViewController)
 
                             // After consent form, check if we can request ads
                             print(
