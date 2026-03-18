@@ -85,6 +85,11 @@ private enum TimeoutResult {
     @MainActor private var lastInterstitialUnitID: String?
     @MainActor private var lastRewardedUnitID: String?
 
+    // Nonisolated mirrors so `adUnitID(for:)` can be called from nonisolated
+    // delegate methods without requiring an async hop.
+    nonisolated(unsafe) private var _lastInterstitialUnitID: String?
+    nonisolated(unsafe) private var _lastRewardedUnitID: String?
+
     // MARK: - Synchronous state mirrors
     // Written only from @MainActor (always paired with the actor-isolated property),
     // read from nonisolated @objc entry points where an async hop would be unsound.
@@ -284,7 +289,7 @@ private enum TimeoutResult {
     @objc public func show_banner_ad(position: Int32) -> Bool {
         guard _hasBannerView && _isBannerLoaded else {
             logger.warning(
-                "show_banner_ad called but banner is not ready (hasBannerView=\(_hasBannerView) loaded=\(_isBannerLoaded))"
+                "show_banner_ad called but banner is not ready (hasBannerView=\(self._hasBannerView) loaded=\(self._isBannerLoaded))"
             )
             return false
         }
@@ -356,6 +361,7 @@ private enum TimeoutResult {
                 self.interstitialAd = ad
                 self.interstitialAd?.fullScreenContentDelegate = self
                 self.lastInterstitialUnitID = unitID
+                self._lastInterstitialUnitID = unitID
                 self.setHasInterstitial(true)
                 self.logger.debug("Interstitial ad loaded — unit: \(unitID, privacy: .public)")
                 on_ad_loaded("interstitial")
@@ -408,6 +414,7 @@ private enum TimeoutResult {
                 self.rewardedAd = ad
                 self.rewardedAd?.fullScreenContentDelegate = self
                 self.lastRewardedUnitID = unitID
+                self._lastRewardedUnitID = unitID
                 self.setHasRewarded(true)
                 self.logger.debug("Rewarded ad loaded — unit: \(unitID, privacy: .public)")
                 on_ad_loaded("rewarded")
@@ -509,45 +516,8 @@ private enum TimeoutResult {
     ) async {
         let result = await withTimeout(consentTimeoutSeconds) { [weak self] in
             guard let self else { return }
-
-            await withCheckedContinuation { continuation in
-                ConsentInformation.shared.requestConsentInfoUpdate(
-                    with: parameters
-                ) { [weak self] error in
-                    guard let self else { continuation.resume(); return }
-
-                    if let error {
-                        self.logger.error(
-                            "Consent info update failed: \(error.localizedDescription, privacy: .public)"
-                        )
-                        Task { @MainActor in
-                            self.finishInitializing()
-                            on_consent_gathered(error.localizedDescription)
-                        }
-                        continuation.resume()
-                        return
-                    }
-
-                    Task { @MainActor in
-                        self.refreshConsentMirrors()
-
-                        let status = ConsentInformation.shared.consentStatus
-                        let formStatus = ConsentInformation.shared.formStatus
-                        let elapsed = ContinuousClock.now - startTime
-
-                        self.logger.debug(
-                            "[init step 2/4] Consent info updated (\(elapsed)). "
-                                + "consentStatus=\(consentStatusName(status), privacy: .public) "
-                                + "formStatus=\(formStatusName(formStatus), privacy: .public) "
-                                + "canRequestAds=\(self._canRequestAds)"
-                        )
-
-                        await self.handleConsentResult(
-                            from: rootViewController, startTime: startTime)
-                        continuation.resume()
-                    }
-                }
-            }
+            await self.requestConsentInfoUpdate(
+                parameters: parameters, from: rootViewController, startTime: startTime)
         }
 
         if result == .timedOut {
@@ -556,6 +526,46 @@ private enum TimeoutResult {
             )
             finishInitializing()
             on_consent_gathered("Timeout")
+        }
+    }
+
+    /// Wraps `ConsentInformation.requestConsentInfoUpdate` in a checked continuation
+    /// so the caller can `await` its completion.
+    private func requestConsentInfoUpdate(
+        parameters: RequestParameters, from rootViewController: UIViewController,
+        startTime: ContinuousClock.Instant
+    ) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            ConsentInformation.shared.requestConsentInfoUpdate(with: parameters) { [weak self] error in
+                guard let self else { continuation.resume(); return }
+
+                if let error {
+                    self.logger.error(
+                        "Consent info update failed: \(error.localizedDescription, privacy: .public)"
+                    )
+                    Task { @MainActor in
+                        self.finishInitializing()
+                        on_consent_gathered(error.localizedDescription)
+                    }
+                    continuation.resume()
+                    return
+                }
+
+                Task { @MainActor in
+                    self.refreshConsentMirrors()
+
+                    let status = ConsentInformation.shared.consentStatus
+                    let formStatus = ConsentInformation.shared.formStatus
+                    let elapsed = ContinuousClock.now - startTime
+
+                    self.logger.debug(
+                        "[init step 2/4] Consent info updated (\(elapsed)). consentStatus=\(consentStatusName(status), privacy: .public) formStatus=\(formStatusName(formStatus), privacy: .public) canRequestAds=\(self._canRequestAds)"
+                    )
+
+                    await self.handleConsentResult(from: rootViewController, startTime: startTime)
+                    continuation.resume()
+                }
+            }
         }
     }
 
@@ -583,8 +593,7 @@ private enum TimeoutResult {
             // First-run or stale consent: load and present the form if needed.
             let formStatus = ConsentInformation.shared.formStatus
             logger.debug(
-                "[init step 3/4] Consent required — loading UMP form. "
-                    + "formStatus=\(formStatusName(formStatus), privacy: .public)"
+                "[init step 3/4] Consent required — loading UMP form. formStatus=\(formStatusName(formStatus), privacy: .public)"
             )
             do {
                 try await ConsentForm.loadAndPresentIfRequired(from: rootViewController)
@@ -620,8 +629,7 @@ private enum TimeoutResult {
             // serve non-personalised ads only. Report the limitation to the Rust side
             // so it can react (e.g. hide personalisation-dependent features).
             logger.warning(
-                "Consent obtained but canRequestAds=false — ads will be limited. "
-                    + "Proceeding to SDK init."
+                "Consent obtained but canRequestAds=false — ads will be limited. Proceeding to SDK init."
             )
             logIABTCFConsentStrings()
             on_consent_gathered("limited")
@@ -647,46 +655,54 @@ private enum TimeoutResult {
         logger.debug("[init step 4/4] Starting MobileAds SDK… (\(elapsed) since init start)")
 
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            MobileAds.shared.start { [weak self] status in
+            MobileAds.shared.start { [weak self] initStatus in
                 guard let self else { continuation.resume(); return }
                 Task { @MainActor in
-                    self.setInitialized(true)
-                    self.finishInitializing()
-                    self.refreshConsentMirrors()
-
-                    // Log only adapters that are not yet ready — avoid dumping
-                    // the full dictionary which produces an unreadable blob.
-                    let notReady = status.adapterStatusesByClassName
-                        .filter { $0.value.state != .ready }
-                        .map { "\($0.key): \($0.value.state.rawValue)" }
-                    if notReady.isEmpty {
-                        self.logger.debug("MobileAds SDK started — all adapters ready.")
-                    } else {
-                        self.logger.warning(
-                            "MobileAds SDK started — adapters not ready: \(notReady.joined(separator: ", "), privacy: .public)"
-                        )
-                    }
-
-                    // Final summary log for the entire initialisation flow.
-                    let totalElapsed = ContinuousClock.now - startTime
-                    let consentStatus = ConsentInformation.shared.consentStatus
-                    var attSummary = "n/a"
-                    if #available(iOS 14, *) {
-                        attSummary = attStatus.map { attStatusName($0) } ?? "skipped"
-                    }
-                    self.logger.info(
-                        "AdMob init complete (\(totalElapsed)). "
-                            + "consent=\(consentStatusName(consentStatus), privacy: .public) "
-                            + "ATT=\(attSummary, privacy: .public) "
-                            + "canRequestAds=\(self._canRequestAds) "
-                            + "privacyOptionsRequired=\(self._isPrivacyOptionsRequired)"
-                    )
-
-                    on_initialized(true)
+                    await self.finishMobileAdsStart(
+                        initStatus: initStatus,
+                        attStatus: attStatus,
+                        startTime: startTime)
                     continuation.resume()
                 }
             }
         }
+    }
+
+    /// Called on @MainActor once `MobileAds.shared.start` completes.
+    @MainActor private func finishMobileAdsStart(
+        initStatus: InitializationStatus,
+        attStatus: ATTrackingManager.AuthorizationStatus?,
+        startTime: ContinuousClock.Instant
+    ) async {
+        setInitialized(true)
+        finishInitializing()
+        refreshConsentMirrors()
+
+        // Log only adapters that are not yet ready — avoid dumping
+        // the full dictionary which produces an unreadable blob.
+        let notReady = initStatus.adapterStatusesByClassName
+            .filter { $0.value.state != .ready }
+            .map { "\($0.key): \($0.value.state.rawValue)" }
+        if notReady.isEmpty {
+            logger.debug("MobileAds SDK started — all adapters ready.")
+        } else {
+            logger.warning(
+                "MobileAds SDK started — adapters not ready: \(notReady.joined(separator: ", "), privacy: .public)"
+            )
+        }
+
+        // Final summary log for the entire initialisation flow.
+        let totalElapsed = ContinuousClock.now - startTime
+        let consentStatus = ConsentInformation.shared.consentStatus
+        var attSummary = "n/a"
+        if #available(iOS 14, *) {
+            attSummary = attStatus.map { attStatusName($0) } ?? "skipped"
+        }
+        logger.info(
+            "AdMob init complete (\(totalElapsed)). consent=\(consentStatusName(consentStatus), privacy: .public) ATT=\(attSummary, privacy: .public) canRequestAds=\(self._canRequestAds) privacyOptionsRequired=\(self._isPrivacyOptionsRequired)"
+        )
+
+        on_initialized(true)
     }
 
     /// Requests ATT tracking authorisation on iOS 14+ and logs the outcome.
@@ -748,7 +764,7 @@ private enum TimeoutResult {
             logger.warning("\(context, privacy: .public): ads blocked — consent not granted.")
         } else {
             logger.warning(
-                "\(context, privacy: .public): ads blocked — unknown reason (initialized=\(_isInitialized), canRequestAds=\(_canRequestAds))."
+                "\(context, privacy: .public): ads blocked — unknown reason (initialized=\(self._isInitialized), canRequestAds=\(self._canRequestAds))."
             )
         }
     }
@@ -763,10 +779,7 @@ private enum TimeoutResult {
         let vendorConsents = defaults.string(forKey: "IABTCF_VendorConsents") ?? "(not set)"
 
         logger.debug(
-            "IABTCF: gdprApplies=\(gdprApplies) "
-                + "TCString=\(tcString, privacy: .private) "
-                + "PurposeConsents=\(purposeConsents, privacy: .public) "
-                + "VendorConsents=\(vendorConsents, privacy: .private)"
+            "IABTCF: gdprApplies=\(gdprApplies) TCString=\(tcString, privacy: .private) PurposeConsents=\(purposeConsents, privacy: .public) VendorConsents=\(vendorConsents, privacy: .private)"
         )
     }
 }
@@ -840,10 +853,12 @@ extension AdMobManager: FullScreenContentDelegate {
             if ad_f is InterstitialAd {
                 self.interstitialAd = nil
                 self.lastInterstitialUnitID = nil
+                self._lastInterstitialUnitID = nil
                 self.setHasInterstitial(false)
             } else if ad_f is RewardedAd {
                 self.rewardedAd = nil
                 self.lastRewardedUnitID = nil
+                self._lastRewardedUnitID = nil
                 self.setHasRewarded(false)
             }
         }
@@ -854,11 +869,13 @@ extension AdMobManager: FullScreenContentDelegate {
     }
 
     /// Returns the ad unit ID for the given fullscreen ad, if tracked.
-    @MainActor private func adUnitID(for ad: FullScreenPresentingAd) -> String {
+    /// Reads from nonisolated(unsafe) mirrors so it can be called from nonisolated
+    /// delegate methods without an async hop.
+    private func adUnitID(for ad: FullScreenPresentingAd) -> String {
         if ad is InterstitialAd {
-            return lastInterstitialUnitID ?? "?"
+            return _lastInterstitialUnitID ?? "?"
         } else if ad is RewardedAd {
-            return lastRewardedUnitID ?? "?"
+            return _lastRewardedUnitID ?? "?"
         }
         return "?"
     }
