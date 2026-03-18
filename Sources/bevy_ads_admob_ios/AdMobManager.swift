@@ -80,6 +80,9 @@ private enum TimeoutResult {
     @MainActor private var bannerPosition: BannerPosition = .bottom
     @MainActor private var interstitialAd: InterstitialAd?
     @MainActor private var rewardedAd: RewardedAd?
+    /// A transparent UIWindow placed above the game's Metal window, used to present
+    /// UIKit content (consent forms, fullscreen ads, banner ads) above the CAMetalLayer.
+    @MainActor private var overlayWindow: UIWindow?
 
     // Ad unit IDs are stored alongside their ad references for logging.
     @MainActor private var lastInterstitialUnitID: String?
@@ -165,9 +168,9 @@ private enum TimeoutResult {
         }
 
         Task { @MainActor in
-            guard let rootViewController = self.keyRootViewController() else {
+            guard let rootViewController = self.getOrCreateOverlayViewController() else {
                 self.logger.error(
-                    "show_privacy_options_form: could not obtain root view controller.")
+                    "show_privacy_options_form: could not obtain overlay view controller.")
                 on_consent_gathered("Could not obtain root view controller")
                 return
             }
@@ -181,6 +184,7 @@ private enum TimeoutResult {
 
                 self.refreshConsentMirrors()
                 self.logger.debug("Privacy options form dismissed.")
+                self.dismissOverlayWindow()
 
                 if self._canRequestAds {
                     on_consent_gathered("")
@@ -192,6 +196,7 @@ private enum TimeoutResult {
             } catch {
                 self.logger.error(
                     "Privacy options form error: \(error.localizedDescription, privacy: .public)")
+                self.dismissOverlayWindow()
                 on_consent_gathered(error.localizedDescription)
             }
         }
@@ -240,8 +245,8 @@ private enum TimeoutResult {
         Task { @MainActor in
             let startTime = ContinuousClock.now
 
-            guard let rootViewController = self.keyRootViewController() else {
-                self.logger.error("initialize_admob: could not obtain root view controller.")
+            guard let rootViewController = self.getOrCreateOverlayViewController() else {
+                self.logger.error("initialize_admob: could not obtain overlay view controller.")
                 self.finishInitializing()
                 on_consent_gathered("Could not obtain root view controller")
                 return
@@ -270,7 +275,7 @@ private enum TimeoutResult {
             let adSize = adSizeFor(cgSize: CGSize(width: CGFloat(width), height: CGFloat(height)))
             let banner = BannerView(adSize: adSize)
             banner.adUnitID = unitID
-            banner.rootViewController = self.keyRootViewController()
+            banner.rootViewController = self.getOrCreateOverlayViewController()
             banner.delegate = self
             self.bannerView = banner
             self.setBannerLoaded(false)
@@ -297,7 +302,7 @@ private enum TimeoutResult {
         Task { @MainActor in
             guard
                 let banner = self.bannerView,
-                let rootViewController = self.keyRootViewController()
+                let overlayVC = self.getOrCreateOverlayViewController()
             else { return }
 
             let resolvedPosition = BannerPosition(rawValue: position) ?? .bottom
@@ -308,15 +313,15 @@ private enum TimeoutResult {
                 self.logger.debug(
                     "show_banner_ad: banner already in view hierarchy — updating position only.")
                 self.applyBannerConstraints(
-                    banner: banner, in: rootViewController.view,
+                    banner: banner, in: overlayVC.view,
                     position: resolvedPosition)
                 return
             }
 
             banner.translatesAutoresizingMaskIntoConstraints = false
-            rootViewController.view.addSubview(banner)
+            overlayVC.view.addSubview(banner)
             self.applyBannerConstraints(
-                banner: banner, in: rootViewController.view,
+                banner: banner, in: overlayVC.view,
                 position: resolvedPosition)
 
             self.logger.debug(
@@ -333,6 +338,9 @@ private enum TimeoutResult {
         Task { @MainActor in
             self.bannerView?.removeFromSuperview()
             self.logger.debug("Banner ad hidden.")
+            // Release the overlay window now that the banner is gone. It will be
+            // re-created on demand if another banner or fullscreen ad is shown.
+            self.dismissOverlayWindow()
         }
 
         return true
@@ -380,9 +388,9 @@ private enum TimeoutResult {
         Task { @MainActor in
             guard
                 let ad = self.interstitialAd,
-                let rootViewController = self.keyRootViewController()
+                let overlayVC = self.getOrCreateOverlayViewController()
             else { return }
-            ad.present(from: rootViewController)
+            ad.present(from: overlayVC)
             self.logger.debug(
                 "Interstitial ad presented — unit: \(self.lastInterstitialUnitID ?? "?", privacy: .public)."
             )
@@ -433,10 +441,10 @@ private enum TimeoutResult {
         Task { @MainActor in
             guard
                 let ad = self.rewardedAd,
-                let rootViewController = self.keyRootViewController()
+                let overlayVC = self.getOrCreateOverlayViewController()
             else { return }
 
-            ad.present(from: rootViewController) { [weak self] in
+            ad.present(from: overlayVC) { [weak self] in
                 let reward = ad.adReward
                 self?.logger.debug(
                     "User earned reward: \(reward.amount) \(reward.type, privacy: .public)")
@@ -502,6 +510,54 @@ private enum TimeoutResult {
             return nil
         }
         return window.rootViewController
+    }
+
+    /// Returns the root view controller of a transparent overlay UIWindow that sits above
+    /// the game's Metal rendering window. All UIKit content that must appear over the
+    /// CAMetalLayer (consent forms, fullscreen ads, banner ads) should be presented from
+    /// this view controller.
+    ///
+    /// The overlay window is created lazily on first call and reused until
+    /// `dismissOverlayWindow()` is called. It uses `.alert + 1` window level so it
+    /// appears above every other window, including the game's winit UIWindow.
+    @MainActor private func getOrCreateOverlayViewController() -> UIViewController? {
+        if let existing = overlayWindow {
+            return existing.rootViewController
+        }
+
+        guard
+            let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene
+        else {
+            logger.error("getOrCreateOverlayViewController: no UIWindowScene available.")
+            return nil
+        }
+
+        let window = UIWindow(windowScene: windowScene)
+        window.windowLevel = .alert + 1
+        window.backgroundColor = .clear
+        window.isOpaque = false
+
+        let vc = UIViewController()
+        vc.view.backgroundColor = .clear
+        vc.view.isOpaque = false
+        window.rootViewController = vc
+        window.makeKeyAndVisible()
+
+        overlayWindow = window
+        logger.debug("Overlay window created (windowLevel=\(window.windowLevel.rawValue)).")
+        return vc
+    }
+
+    /// Hides and releases the overlay window. Call this once the content presented from
+    /// `getOrCreateOverlayViewController()` has been fully dismissed.
+    ///
+    /// - Important: Do **not** call this while a banner ad is still visible, since the
+    ///   banner lives as a subview of the overlay window's root view.
+    @MainActor private func dismissOverlayWindow() {
+        guard overlayWindow != nil else { return }
+        overlayWindow?.isHidden = true
+        overlayWindow = nil
+        logger.debug("Overlay window dismissed.")
     }
 
     /// Resets the initialising flag on both the actor-isolated and mirror copies.
@@ -582,6 +638,7 @@ private enum TimeoutResult {
             logger.debug(
                 "Consent already granted (status=\(consentStatusName(status), privacy: .public)) — proceeding to SDK init."
             )
+            dismissOverlayWindow()
             on_consent_gathered("")
             logIABTCFConsentStrings()
             await startMobileAdsSdk(startTime: startTime)
@@ -601,6 +658,10 @@ private enum TimeoutResult {
                 logger.debug(
                     "UMP form dismissed. canRequestAds=\(self._canRequestAds)")
                 logIABTCFConsentStrings()
+                // The consent form has been dismissed; release the overlay window now.
+                // startMobileAdsSdk may trigger the ATT prompt (presented from a fresh
+                // overlay) so we dismiss here before that step.
+                dismissOverlayWindow()
 
                 if _canRequestAds {
                     on_consent_gathered("")
@@ -612,6 +673,7 @@ private enum TimeoutResult {
                 }
             } catch {
                 logger.error("UMP form error: \(error.localizedDescription, privacy: .public)")
+                dismissOverlayWindow()
                 finishInitializing()
                 on_consent_gathered(error.localizedDescription)
             }
@@ -619,6 +681,7 @@ private enum TimeoutResult {
         case .notRequired:
             // Outside a region that requires explicit consent — ads are allowed.
             logger.debug("Consent not required in this region — proceeding to SDK init.")
+            dismissOverlayWindow()
             on_consent_gathered("")
             logIABTCFConsentStrings()
             await startMobileAdsSdk(startTime: startTime)
@@ -631,6 +694,7 @@ private enum TimeoutResult {
             logger.warning(
                 "Consent obtained but canRequestAds=false — ads will be limited. Proceeding to SDK init."
             )
+            dismissOverlayWindow()
             logIABTCFConsentStrings()
             on_consent_gathered("limited")
             await startMobileAdsSdk(startTime: startTime)
@@ -641,6 +705,7 @@ private enum TimeoutResult {
             logger.error(
                 "Unexpected consent status (\(consentStatusName(status), privacy: .public)) — cannot initialise ads."
             )
+            dismissOverlayWindow()
             finishInitializing()
             on_consent_gathered("Unexpected consent status: \(consentStatusName(status))")
         }
@@ -833,6 +898,10 @@ extension AdMobManager: FullScreenContentDelegate {
         )
         // This is a *presentation* failure, not a *load* failure. Use the distinct
         // callback so the Rust side can handle it differently (e.g. not auto-reload).
+        // The overlay window is no longer needed since the ad failed to appear.
+        Task { @MainActor in
+            self.dismissOverlayWindow()
+        }
         on_ad_failed_to_present(adType, error.localizedDescription)
     }
 
@@ -849,6 +918,7 @@ extension AdMobManager: FullScreenContentDelegate {
         on_ad_closed(adType)
 
         // Clear the reference so is_*_ready() returns false and a new ad can be loaded.
+        // Also release the overlay window — it is no longer needed until the next ad.
         Task { @MainActor in
             if ad_f is InterstitialAd {
                 self.interstitialAd = nil
@@ -861,6 +931,7 @@ extension AdMobManager: FullScreenContentDelegate {
                 self._lastRewardedUnitID = nil
                 self.setHasRewarded(false)
             }
+            self.dismissOverlayWindow()
         }
     }
 
