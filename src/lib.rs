@@ -102,6 +102,34 @@ impl AdmobAdsSystem<'_, '_> {
         let ad_unit = config.get_ad_unit_id(ad_type);
         self.load_ad(ad_type, &ad_unit)
     }
+
+    /// Returns `true` when the UMP privacy-options form is required (GDPR regions).
+    /// The game UI should show a "Manage Privacy" button when this is `true`.
+    pub fn is_privacy_options_required(&self) -> bool {
+        #[cfg(target_os = "ios")]
+        {
+            native::ADMOB_NATIVE.with_borrow(|f| f.is_privacy_options_required())
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            false
+        }
+    }
+
+    /// Presents the UMP privacy-options form so the user can update their consent.
+    /// Returns `true` if the form presentation was started (result comes via
+    /// `AdMessage::ConsentGathered`).
+    pub fn show_privacy_options_form(&self) -> bool {
+        #[cfg(target_os = "ios")]
+        {
+            native::ADMOB_NATIVE.with_borrow(|f| f.show_privacy_options_form())
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            bevy_log::info!("Privacy options form simulated - not running on iOS");
+            false
+        }
+    }
 }
 
 #[allow(
@@ -126,7 +154,7 @@ impl bevy_ads_common::AdManager for AdmobAdsSystem<'_, '_> {
                 Some(cfg) => cfg.test_device_id.clone(),
                 None => None,
             };
-            native::ADMOB_NATIVE.with_borrow_mut(|f| f.initialize(device_id.as_deref()));
+            native::ADMOB_NATIVE.with_borrow(|f| f.initialize(device_id.as_deref()));
             true
         }
         #[cfg(not(target_os = "ios"))]
@@ -142,13 +170,13 @@ impl bevy_ads_common::AdManager for AdmobAdsSystem<'_, '_> {
 
     fn show_banner(&mut self) -> bool {
         if !self.is_initialized() {
-            bevy_log::info!("AdMob not initialized");
+            bevy_log::warn!("AdMob not initialized");
             return false;
         }
 
         #[cfg(target_os = "ios")]
         {
-            native::ADMOB_NATIVE.with_borrow_mut(|f| f.show_banner_ad())
+            native::ADMOB_NATIVE.with_borrow(|f| f.show_banner_ad(0))
         }
         #[cfg(not(target_os = "ios"))]
         {
@@ -159,13 +187,13 @@ impl bevy_ads_common::AdManager for AdmobAdsSystem<'_, '_> {
 
     fn show_interstitial(&mut self) -> bool {
         if !self.is_initialized() {
-            bevy_log::info!("AdMob not initialized");
+            bevy_log::warn!("AdMob not initialized");
             return false;
         }
 
         #[cfg(target_os = "ios")]
         {
-            native::ADMOB_NATIVE.with_borrow_mut(|f| f.show_interstitial_ad())
+            native::ADMOB_NATIVE.with_borrow(|f| f.show_interstitial_ad())
         }
         #[cfg(not(target_os = "ios"))]
         {
@@ -176,13 +204,13 @@ impl bevy_ads_common::AdManager for AdmobAdsSystem<'_, '_> {
 
     fn show_rewarded(&mut self) -> bool {
         if !self.is_initialized() {
-            bevy_log::info!("AdMob not initialized");
+            bevy_log::warn!("AdMob not initialized");
             return false;
         }
 
         #[cfg(target_os = "ios")]
         {
-            native::ADMOB_NATIVE.with_borrow_mut(|f| f.show_rewarded_ad())
+            native::ADMOB_NATIVE.with_borrow(|f| f.show_rewarded_ad())
         }
         #[cfg(not(target_os = "ios"))]
         {
@@ -193,13 +221,13 @@ impl bevy_ads_common::AdManager for AdmobAdsSystem<'_, '_> {
 
     fn hide_banner(&mut self) -> bool {
         if !self.is_initialized() {
-            bevy_log::info!("AdMob not initialized");
+            bevy_log::warn!("AdMob not initialized");
             return false;
         }
 
         #[cfg(target_os = "ios")]
         {
-            native::ADMOB_NATIVE.with_borrow_mut(|f| f.hide_banner_ad())
+            native::ADMOB_NATIVE.with_borrow(|f| f.hide_banner_ad())
         }
         #[cfg(not(target_os = "ios"))]
         {
@@ -222,7 +250,7 @@ impl bevy_ads_common::AdManager for AdmobAdsSystem<'_, '_> {
             let banner_width = self.get_banner_width(ad_id);
             let banner_height = self.get_banner_height(ad_id);
             native::ADMOB_NATIVE
-                .with_borrow_mut(|f| f.load_banner_ad(ad_id, banner_width, banner_height))
+                .with_borrow(|f| f.load_banner_ad(ad_id, banner_width, banner_height))
         }
         #[cfg(not(target_os = "ios"))]
         {
@@ -233,13 +261,13 @@ impl bevy_ads_common::AdManager for AdmobAdsSystem<'_, '_> {
 
     fn load_interstitial(&mut self, ad_id: &str) -> bool {
         if !self.is_initialized() {
-            bevy_log::info!("AdMob not initialized");
+            bevy_log::warn!("AdMob not initialized");
             return false;
         }
 
         #[cfg(target_os = "ios")]
         {
-            native::ADMOB_NATIVE.with_borrow_mut(|f| f.load_interstitial_ad(ad_id))
+            native::ADMOB_NATIVE.with_borrow(|f| f.load_interstitial_ad(ad_id))
         }
         #[cfg(not(target_os = "ios"))]
         {
@@ -250,12 +278,12 @@ impl bevy_ads_common::AdManager for AdmobAdsSystem<'_, '_> {
 
     fn load_rewarded(&mut self, ad_id: &str) -> bool {
         if !self.is_initialized() {
-            bevy_log::info!("AdMob not initialized");
+            bevy_log::warn!("AdMob not initialized");
             return false;
         }
         #[cfg(target_os = "ios")]
         {
-            native::ADMOB_NATIVE.with_borrow_mut(|f| f.load_rewarded_ad(ad_id))
+            native::ADMOB_NATIVE.with_borrow(|f| f.load_rewarded_ad(ad_id))
         }
         #[cfg(not(target_os = "ios"))]
         {
@@ -264,15 +292,29 @@ impl bevy_ads_common::AdManager for AdmobAdsSystem<'_, '_> {
         }
     }
 
-    fn is_interstitial_ready(&self) -> bool {
+    fn is_banner_ready(&self) -> bool {
         if !self.is_initialized() {
-            bevy_log::info!("AdMob not initialized");
             return false;
         }
 
         #[cfg(target_os = "ios")]
         {
-            native::ADMOB_NATIVE.with_borrow_mut(|f| f.is_interstitial_ready())
+            native::ADMOB_NATIVE.with_borrow(|f| f.is_banner_ready())
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            true
+        }
+    }
+
+    fn is_interstitial_ready(&self) -> bool {
+        if !self.is_initialized() {
+            return false;
+        }
+
+        #[cfg(target_os = "ios")]
+        {
+            native::ADMOB_NATIVE.with_borrow(|f| f.is_interstitial_ready())
         }
         #[cfg(not(target_os = "ios"))]
         {
@@ -282,13 +324,12 @@ impl bevy_ads_common::AdManager for AdmobAdsSystem<'_, '_> {
 
     fn is_rewarded_ready(&self) -> bool {
         if !self.is_initialized() {
-            bevy_log::info!("AdMob not initialized");
             return false;
         }
 
         #[cfg(target_os = "ios")]
         {
-            native::ADMOB_NATIVE.with_borrow_mut(|f| f.is_rewarded_ready())
+            native::ADMOB_NATIVE.with_borrow(|f| f.is_rewarded_ready())
         }
         #[cfg(not(target_os = "ios"))]
         {
@@ -368,6 +409,6 @@ impl Plugin for AdMobPlugin {
 
 /// Convenience functions for common operations
 pub mod prelude {
-    pub use crate::{AdMobConfig, AdMobManager, AdMobPlugin};
+    pub use crate::{AdMobConfig, AdMobManager, AdMobPlugin, AdmobAdsSystem};
     pub use bevy_ads_common::{AdManager, AdMessage, AdType};
 }

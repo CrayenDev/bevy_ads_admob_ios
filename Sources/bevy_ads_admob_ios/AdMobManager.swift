@@ -5,59 +5,189 @@ import Foundation
 import GoogleMobileAds
 import UIKit
 import UserMessagingPlatform
+import os
+
+// MARK: - BannerPosition
+
+/// Banner display position. Raw value is the integer passed across the Rust bridge.
+private enum BannerPosition: Int32 {
+    case bottom = 0
+    case top = 1
+}
+
+// MARK: - Consent status helpers
+
+/// Human-readable name for `UMPConsentStatus`.
+private func consentStatusName(_ status: ConsentStatus) -> String {
+    switch status {
+    case .unknown: return "unknown"
+    case .required: return "required"
+    case .notRequired: return "notRequired"
+    case .obtained: return "obtained"
+    @unknown default: return "unrecognised(\(status.rawValue))"
+    }
+}
+
+/// Human-readable name for `UMPFormStatus`.
+private func formStatusName(_ status: FormStatus) -> String {
+    switch status {
+    case .unknown: return "unknown"
+    case .available: return "available"
+    case .unavailable: return "unavailable"
+    @unknown default: return "unrecognised(\(status.rawValue))"
+    }
+}
+
+/// Human-readable name for `ATTrackingManager.AuthorizationStatus`.
+@available(iOS 14, *)
+private func attStatusName(_ status: ATTrackingManager.AuthorizationStatus) -> String {
+    switch status {
+    case .authorized: return "authorized"
+    case .denied: return "denied"
+    case .restricted: return "restricted"
+    case .notDetermined: return "notDetermined"
+    @unknown default: return "unrecognised(\(status.rawValue))"
+    }
+}
+
+// MARK: - Timeout helper result
+
+/// Outcome of the `withTimeout` utility.
+private enum TimeoutResult {
+    case completed
+    case timedOut
+}
+
+// MARK: - AdMobManager
 
 @objc public class AdMobManager: NSObject {
-    var canRequestAds: Bool {
-        return ConsentInformation.shared.canRequestAds
-    }
-    var isPrivacyOptionsRequired: Bool {
-        return ConsentInformation.shared.privacyOptionsRequirementStatus == .required
+
+    // MARK: - Logging
+
+    private let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "bevy_ads", category: "AdMob")
+
+    // MARK: - Consent timeout
+
+    /// Maximum time to wait for the UMP consent info update before giving up.
+    private let consentTimeoutSeconds: Duration = .seconds(10)
+
+    // MARK: - Main-actor state
+    // All mutable UI-bound state lives here. It is written exclusively from @MainActor
+    // tasks and read from @objc entry points via the nonisolated(unsafe) mirrors below.
+
+    @MainActor private var bannerView: BannerView?
+    @MainActor private var bannerPosition: BannerPosition = .bottom
+    @MainActor private var interstitialAd: InterstitialAd?
+    @MainActor private var rewardedAd: RewardedAd?
+
+    // Ad unit IDs are stored alongside their ad references for logging.
+    @MainActor private var lastInterstitialUnitID: String?
+    @MainActor private var lastRewardedUnitID: String?
+
+    // MARK: - Synchronous state mirrors
+    // Written only from @MainActor (always paired with the actor-isolated property),
+    // read from nonisolated @objc entry points where an async hop would be unsound.
+    // The nonisolated(unsafe) annotation acknowledges the compiler cannot verify
+    // the invariant; it is enforced by convention via the setter helpers below.
+
+    nonisolated(unsafe) private var _isInitialized = false
+    nonisolated(unsafe) private var _isInitializing = false
+    nonisolated(unsafe) private var _isBannerLoaded = false
+    nonisolated(unsafe) private var _hasBannerView = false
+    nonisolated(unsafe) private var _hasInterstitial = false
+    nonisolated(unsafe) private var _hasRewarded = false
+    nonisolated(unsafe) private var _canRequestAds = false
+    nonisolated(unsafe) private var _isPrivacyOptionsRequired = false
+
+    // MARK: - Mirror setter helpers
+    // Centralise the dual-write so callers cannot forget to update one side.
+
+    @MainActor private func setInitialized(_ value: Bool) {
+        _isInitialized = value
     }
 
-    // Helper computed property to check if ads can be loaded
-    private var canLoadAds: Bool {
-        return isInitialized && canRequestAds
+    @MainActor private func setInitializing(_ value: Bool) {
+        _isInitializing = value
     }
 
-    // MARK: - Properties
-    private var bannerView: BannerView?
-    private var interstitialAd: InterstitialAd?
-    private var rewardedAd: RewardedAd?
-    private var isInitialized = false
+    @MainActor private func setBannerLoaded(_ value: Bool) {
+        _isBannerLoaded = value
+    }
+
+    @MainActor private func setHasBannerView(_ value: Bool) {
+        _hasBannerView = value
+    }
+
+    @MainActor private func setHasInterstitial(_ value: Bool) {
+        _hasInterstitial = value
+    }
+
+    @MainActor private func setHasRewarded(_ value: Bool) {
+        _hasRewarded = value
+    }
+
+    /// Refreshes the synchronous mirrors for consent-related state from UMP.
+    /// Call this after any operation that may change consent (init, form dismiss, etc.).
+    @MainActor private func refreshConsentMirrors() {
+        _canRequestAds = ConsentInformation.shared.canRequestAds
+        _isPrivacyOptionsRequired =
+            ConsentInformation.shared.privacyOptionsRequirementStatus == .required
+    }
+
+    // Derived mirror used by load_* guards — reads only nonisolated(unsafe) mirrors.
+    private var _canLoadAds: Bool { _isInitialized && _canRequestAds }
 
     // MARK: - Initialization
+
     @objc public override init() {
         super.init()
     }
 
-    // MARK: - Public Methods
+    // MARK: - Public API
+
     @objc public func is_privacy_options_required() -> Bool {
-        return isPrivacyOptionsRequired
+        return _isPrivacyOptionsRequired
     }
 
+    /// Present the UMP privacy-options form in response to a user action (e.g. a
+    /// "Manage Privacy" button). After the form is dismissed, `on_consent_gathered`
+    /// is called so the Rust side can react to any consent change.
     @objc public func show_privacy_options_form() -> Bool {
-        guard isPrivacyOptionsRequired else {
-            print("Privacy options form is not required.")
+        guard _isPrivacyOptionsRequired else {
+            logger.debug("Privacy options form is not required — skipping.")
             return false
         }
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-
-            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                let window = windowScene.windows.first,
-                let rootViewController = window.rootViewController
-            else {
-                print("Could not get root view controller for privacy options form.")
+        Task { @MainActor in
+            guard let rootViewController = self.keyRootViewController() else {
+                self.logger.error(
+                    "show_privacy_options_form: could not obtain root view controller.")
+                on_consent_gathered("Could not obtain root view controller")
                 return
             }
+            do {
+                let formStatus = ConsentInformation.shared.formStatus
+                self.logger.debug(
+                    "Presenting privacy options form. formStatus=\(formStatusName(formStatus), privacy: .public)"
+                )
 
-            Task { @MainActor in
-                do {
-                    try await self.presentPrivacyOptionsForm(from: rootViewController)
-                } catch {
-                    print("Error presenting privacy options form: \(error.localizedDescription)")
+                try await ConsentForm.presentPrivacyOptionsForm(from: rootViewController)
+
+                self.refreshConsentMirrors()
+                self.logger.debug("Privacy options form dismissed.")
+
+                if self._canRequestAds {
+                    on_consent_gathered("")
+                } else {
+                    self.logger.warning("Consent withdrawn via privacy options form.")
+                    on_consent_gathered("User withdrew consent")
                 }
+                self.logIABTCFConsentStrings()
+            } catch {
+                self.logger.error(
+                    "Privacy options form error: \(error.localizedDescription, privacy: .public)")
+                on_consent_gathered(error.localizedDescription)
             }
         }
 
@@ -65,392 +195,671 @@ import UserMessagingPlatform
     }
 
     @objc public func initialize_admob(test_device_id: RustStr) -> Bool {
-        guard !isInitialized else {
-            print("AdMob already initialized")
+        // Guard against duplicate calls — both fully initialised and mid-flight.
+        guard !_isInitialized && !_isInitializing else {
+            logger.debug(
+                "AdMob already initialised or initialising — ignoring duplicate call.")
             return true
         }
 
-        if #available(iOS 14, *) {
-            ATTrackingManager.requestTrackingAuthorization { status in
-                switch status {
-                case .authorized:
-                    // Tracking authorization dialog was shown
-                    // and we are authorized
-                    print("Authorized to ads")
+        let testID = test_device_id.toString()
 
-                    // Now that we are authorized we can get the IDFA
-                    print(ASIdentifierManager.shared().advertisingIdentifier)
-                case .denied:
-                    // Tracking authorization dialog was
-                    // shown and permission is denied
-                    print("ads Denied")
-                case .notDetermined:
-                    // Tracking authorization dialog has not been shown
-                    print("ADS Not Determined")
-                case .restricted:
-                    print("ADS Restricted")
-
-                @unknown default:
-                    print("ADS Unknown")
-                }
-            }
-        }
-        // ConsentInformation.shared.reset()
+        // Build UMP request parameters.
         let parameters = RequestParameters()
-        let test_id = test_device_id.toString()
-        print("Admob setup test device: \(test_id)")
-        let debugSettings = DebugSettings()
-        debugSettings.geography = .EEA
-        if !test_id.isEmpty {
-            MobileAds.shared.requestConfiguration.testDeviceIdentifiers = [
-                test_id
-            ]
-            // For testing purposes, you can use UMPDebugGeography to simulate a location.
-            debugSettings.testDeviceIdentifiers = [test_id]
-            print("Admob debug setup")
+
+        if !testID.isEmpty {
+            // Debug settings only apply when a test device ID is provided
+            // (i.e. development / QA builds). Never simulate EEA in production.
+            let debugSettings = DebugSettings()
+            debugSettings.geography = .EEA
+            debugSettings.testDeviceIdentifiers = [testID]
+            parameters.debugSettings = debugSettings
+
+            // Register the test device with the Mobile Ads SDK as well.
+            MobileAds.shared.requestConfiguration.testDeviceIdentifiers = [testID]
+
+            logger.debug(
+                "AdMob debug mode — test device: \(testID, privacy: .public), geography: EEA")
         }
 
-        parameters.debugSettings = debugSettings
+        logger.debug(
+            "[init step 1/4] Starting consent info update. canRequestAds=\(ConsentInformation.shared.canRequestAds)"
+        )
 
-        print("Called init admob, can request \(self.canRequestAds)")
-        if self.canRequestAds {
-            self.init_ads_system()
-            return true
+        // Mark as in-flight before the async work begins.
+        Task { @MainActor in
+            self.setInitializing(true)
         }
 
-        // Always request consent info update first
-        DispatchQueue.main.async {
-            // Get the root view controller
-            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                let window = windowScene.windows.first,
-                let rootViewController = window.rootViewController
-            else {
-                print("Could not get root view controller for consent ads admob")
-                on_initialized(false)
+        // Consent information must be refreshed on every app launch.
+        Task { @MainActor in
+            let startTime = ContinuousClock.now
+
+            guard let rootViewController = self.keyRootViewController() else {
+                self.logger.error("initialize_admob: could not obtain root view controller.")
+                self.finishInitializing()
+                on_consent_gathered("Could not obtain root view controller")
                 return
             }
-            // [START request_consent_info_update]
-            // Requesting an update to consent information should be called on every app launch.
-            ConsentInformation.shared.requestConsentInfoUpdate(with: parameters) {
-                requestConsentError in
-                // [START_EXCLUDE]
-                guard requestConsentError == nil else {
-                    print(
-                        "Error requesting consent for ads info update: \(requestConsentError!.localizedDescription)"
-                    )
-                    on_initialized(false)
-                    return
-                }
-                print(
-                    "Consent for ads info updated. canRequestAds: \(self.canRequestAds), formStatus: \(ConsentInformation.shared.consentStatus.rawValue)"
-                )
 
-                // Check if we can already request ads (consent previously given)
-                if self.canRequestAds {
-                    print("Can request ads - initializing immediately")
-                    self.init_ads_system()
-                } else if ConsentInformation.shared.consentStatus == .required {
-                    // Need to show consent form
-                    print("Consent for ads required - loading and presenting form")
-
-                    Task { @MainActor in
-                        do {
-                            try await self.presentPrivacyOptionsForm(from: rootViewController)
-
-                            // After consent form, check if we can request ads
-                            print(
-                                "Consent form for ads completed. canRequestAds: \(self.canRequestAds)"
-                            )
-
-                            if self.canRequestAds {
-                                print("User consent granted - initializing ads")
-                                self.init_ads_system()
-                            } else {
-                                print("User consent not granted for ads")
-                                on_initialized(false)
-                            }
-                        } catch {
-                            print(
-                                "Error loading/presenting consent form for ads: \(error.localizedDescription)"
-                            )
-                            on_initialized(false)
-                        }
-                    }
-                } else {
-                    // Consent not required and can't request ads - edge case
-                    print(
-                        "Consent not required but can't request ads - consent status: \(ConsentInformation.shared.consentStatus.rawValue)"
-                    )
-                    on_initialized(false)
-                }
-            }
+            await self.runConsentFlow(
+                parameters: parameters, from: rootViewController, startTime: startTime)
         }
+
         return true
     }
 
-    /// Helper method to call the UMP SDK method to present the privacy options form.
-    @MainActor func presentPrivacyOptionsForm(from viewController: UIViewController? = nil)
-        async throws
-    {
-        try await ConsentForm.presentPrivacyOptionsForm(from: viewController)
-    }
-
-    func init_ads_system() {
-        // Ensure we're on the main thread
-        if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in
-                self?.init_ads_system()
-            }
-            return
-        }
-        print("Starting ads admob initialization...")
-        MobileAds.shared.start { [weak self] status in
-            self?.isInitialized = true
-            print("AdMob initialized with status: \(status.adapterStatusesByClassName)")
-            print("Can request ads after init: \(self?.canRequestAds ?? false)")
-
-            on_initialized(true)
-        }
-
-    }
+    // MARK: - Banner ads
 
     @objc public func load_banner_ad(ad_unit_id: RustStr, width: Int32, height: Int32) -> Bool {
-        guard canLoadAds else {
-            if !isInitialized {
-                print("AdMob not initialized")
-            } else if !canRequestAds {
-                print("Cannot request ads - consent not granted")
-            }
+        let unitID = ad_unit_id.toString()
+        guard _canLoadAds else {
+            logNotReady(context: "load_banner_ad(\(unitID))")
             return false
         }
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-
-            // Create banner view
+        Task { @MainActor in
+            // `adSizeFor(cgSize:)` is a GoogleMobileAds SDK top-level function
+            // (re-exported via the SPM `GoogleMobileAds` module). It converts a
+            // CGSize into the nearest supported GADAdSize.
             let adSize = adSizeFor(cgSize: CGSize(width: CGFloat(width), height: CGFloat(height)))
-            self.bannerView = BannerView(adSize: adSize)
-            self.bannerView?.adUnitID = ad_unit_id.toString()
+            let banner = BannerView(adSize: adSize)
+            banner.adUnitID = unitID
+            banner.rootViewController = self.keyRootViewController()
+            banner.delegate = self
+            self.bannerView = banner
+            self.setBannerLoaded(false)
+            self.setHasBannerView(true)
 
-            // Set root view controller
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                let window = windowScene.windows.first
-            {
-                self.bannerView?.rootViewController = window.rootViewController
-            }
-
-            // Set delegate
-            self.bannerView?.delegate = self
-
-            // Load ad
-            let request = Request()
-            self.bannerView?.load(request)
+            self.logger.debug(
+                "Loading banner ad — unit: \(unitID, privacy: .public) size: \(width)x\(height)")
+            banner.load(Request())
         }
 
         return true
     }
 
-    @objc public func show_banner_ad() -> Bool {
-        guard let bannerView = bannerView else {
-            print("Banner ad not loaded")
+    /// Shows the loaded banner at the given position.
+    /// - Parameter position: 0 = bottom (default), 1 = top.
+    @objc public func show_banner_ad(position: Int32) -> Bool {
+        guard _hasBannerView && _isBannerLoaded else {
+            logger.warning(
+                "show_banner_ad called but banner is not ready (hasBannerView=\(_hasBannerView) loaded=\(_isBannerLoaded))"
+            )
             return false
         }
 
-        DispatchQueue.main.async {
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                let window = windowScene.windows.first,
-                let rootViewController = window.rootViewController
-            {
+        Task { @MainActor in
+            guard
+                let banner = self.bannerView,
+                let rootViewController = self.keyRootViewController()
+            else { return }
 
-                // Add banner to bottom of screen
-                bannerView.translatesAutoresizingMaskIntoConstraints = false
-                rootViewController.view.addSubview(bannerView)
+            let resolvedPosition = BannerPosition(rawValue: position) ?? .bottom
+            self.bannerPosition = resolvedPosition
 
-                NSLayoutConstraint.activate([
-                    bannerView.centerXAnchor.constraint(
-                        equalTo: rootViewController.view.centerXAnchor),
-                    bannerView.bottomAnchor.constraint(
-                        equalTo: rootViewController.view.safeAreaLayoutGuide.bottomAnchor),
-                ])
+            // Idempotent — skip if already in the view hierarchy.
+            guard banner.superview == nil else {
+                self.logger.debug(
+                    "show_banner_ad: banner already in view hierarchy — updating position only.")
+                self.applyBannerConstraints(
+                    banner: banner, in: rootViewController.view,
+                    position: resolvedPosition)
+                return
             }
+
+            banner.translatesAutoresizingMaskIntoConstraints = false
+            rootViewController.view.addSubview(banner)
+            self.applyBannerConstraints(
+                banner: banner, in: rootViewController.view,
+                position: resolvedPosition)
+
+            self.logger.debug(
+                "Banner ad shown at \(resolvedPosition == .top ? "top" : "bottom", privacy: .public)."
+            )
         }
 
         return true
     }
 
     @objc public func hide_banner_ad() -> Bool {
-        guard let bannerView = bannerView else {
-            return false
-        }
+        guard _hasBannerView else { return false }
 
-        DispatchQueue.main.async {
-            bannerView.removeFromSuperview()
+        Task { @MainActor in
+            self.bannerView?.removeFromSuperview()
+            self.logger.debug("Banner ad hidden.")
         }
 
         return true
     }
 
+    // MARK: - Interstitial ads
+
     @objc public func load_interstitial_ad(ad_unit_id: RustStr) -> Bool {
-        guard canLoadAds else {
-            if !isInitialized {
-                print("AdMob not initialized")
-            } else if !canRequestAds {
-                print("Cannot request ads - consent not granted")
-            }
+        let unitID = ad_unit_id.toString()
+        guard _canLoadAds else {
+            logNotReady(context: "load_interstitial_ad(\(unitID))")
             return false
         }
 
-        let request = Request()
-
-        InterstitialAd.load(with: ad_unit_id.toString(), request: request) {
-            [weak self] ad, error in
-            if let error = error {
-                print("Failed to load interstitial ad: \(error.localizedDescription)")
+        logger.debug("Loading interstitial ad — unit: \(unitID, privacy: .public)")
+        InterstitialAd.load(with: unitID, request: Request()) { [weak self] ad, error in
+            guard let self else { return }
+            if let error {
+                self.logger.error(
+                    "Interstitial load failed (\(unitID, privacy: .public)): \(error.localizedDescription, privacy: .public)"
+                )
                 on_ad_failed_to_load("interstitial", error.localizedDescription)
                 return
             }
-
-            self?.interstitialAd = ad
-            self?.interstitialAd?.fullScreenContentDelegate = self
-            on_ad_loaded("interstitial")
+            Task { @MainActor in
+                self.interstitialAd = ad
+                self.interstitialAd?.fullScreenContentDelegate = self
+                self.lastInterstitialUnitID = unitID
+                self.setHasInterstitial(true)
+                self.logger.debug("Interstitial ad loaded — unit: \(unitID, privacy: .public)")
+                on_ad_loaded("interstitial")
+            }
         }
 
         return true
     }
 
     @objc public func show_interstitial_ad() -> Bool {
-        guard let interstitialAd = interstitialAd else {
-            print("Interstitial ad not loaded")
+        guard _hasInterstitial else {
+            logger.warning("show_interstitial_ad called but no interstitial is loaded.")
             return false
         }
 
-        DispatchQueue.main.async {
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                let window = windowScene.windows.first,
-                let rootViewController = window.rootViewController
-            {
-                interstitialAd.present(from: rootViewController)
-            }
+        Task { @MainActor in
+            guard
+                let ad = self.interstitialAd,
+                let rootViewController = self.keyRootViewController()
+            else { return }
+            ad.present(from: rootViewController)
+            self.logger.debug(
+                "Interstitial ad presented — unit: \(self.lastInterstitialUnitID ?? "?", privacy: .public)."
+            )
         }
 
         return true
     }
 
+    // MARK: - Rewarded ads
+
     @objc public func load_rewarded_ad(ad_unit_id: RustStr) -> Bool {
-        guard canLoadAds else {
-            if !isInitialized {
-                print("AdMob not initialized")
-            } else if !canRequestAds {
-                print("Cannot request ads - consent not granted")
-            }
+        let unitID = ad_unit_id.toString()
+        guard _canLoadAds else {
+            logNotReady(context: "load_rewarded_ad(\(unitID))")
             return false
         }
 
-        let request = Request()
-        let ad_unit = ad_unit_id.toString()
-
-        RewardedAd.load(with: ad_unit, request: request) { [weak self] ad, error in
-            if let error = error {
-                print("Failed to load rewarded ad: \(error.localizedDescription) \(ad_unit)")
+        logger.debug("Loading rewarded ad — unit: \(unitID, privacy: .public)")
+        RewardedAd.load(with: unitID, request: Request()) { [weak self] ad, error in
+            guard let self else { return }
+            if let error {
+                self.logger.error(
+                    "Rewarded load failed (\(unitID, privacy: .public)): \(error.localizedDescription, privacy: .public)"
+                )
                 on_ad_failed_to_load("rewarded", error.localizedDescription)
                 return
             }
-
-            self?.rewardedAd = ad
-            self?.rewardedAd?.fullScreenContentDelegate = self
-            print("Loaded rewarded ad: \(ad_unit)")
-            on_ad_loaded("rewarded")
+            Task { @MainActor in
+                self.rewardedAd = ad
+                self.rewardedAd?.fullScreenContentDelegate = self
+                self.lastRewardedUnitID = unitID
+                self.setHasRewarded(true)
+                self.logger.debug("Rewarded ad loaded — unit: \(unitID, privacy: .public)")
+                on_ad_loaded("rewarded")
+            }
         }
 
         return true
     }
 
     @objc public func show_rewarded_ad() -> Bool {
-        guard let rewardedAd = rewardedAd else {
-            print("Rewarded ad not loaded")
+        guard _hasRewarded else {
+            logger.warning("show_rewarded_ad called but no rewarded ad is loaded.")
             return false
         }
 
-        DispatchQueue.main.async {
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                let window = windowScene.windows.first,
-                let rootViewController = window.rootViewController
-            {
-                rewardedAd.present(from: rootViewController) { [weak self] in
-                    let reward = rewardedAd.adReward
-                    print("User earned reward: \(reward.amount) \(reward.type)")
-                    on_rewarded_ad_earned_reward(Int32(truncating: reward.amount), reward.type)
-                }
+        Task { @MainActor in
+            guard
+                let ad = self.rewardedAd,
+                let rootViewController = self.keyRootViewController()
+            else { return }
+
+            ad.present(from: rootViewController) { [weak self] in
+                let reward = ad.adReward
+                self?.logger.debug(
+                    "User earned reward: \(reward.amount) \(reward.type, privacy: .public)")
+                on_rewarded_ad_earned_reward(Int32(truncating: reward.amount), reward.type)
             }
+            self.logger.debug(
+                "Rewarded ad presented — unit: \(self.lastRewardedUnitID ?? "?", privacy: .public)."
+            )
         }
 
         return true
     }
 
+    // MARK: - Ready state queries
+
+    @objc public func is_banner_ready() -> Bool {
+        return _hasBannerView && _isBannerLoaded
+    }
+
     @objc public func is_interstitial_ready() -> Bool {
-        return interstitialAd != nil
+        return _hasInterstitial
     }
 
     @objc public func is_rewarded_ready() -> Bool {
-        return rewardedAd != nil
+        return _hasRewarded
+    }
+
+    // MARK: - Private helpers
+
+    /// Applies the banner's position constraints inside `superview`, removing any
+    /// previously installed banner constraints first.
+    @MainActor private func applyBannerConstraints(
+        banner: BannerView, in superview: UIView, position: BannerPosition
+    ) {
+        // Remove any existing constraints that involve the banner.
+        superview.constraints
+            .filter { $0.firstItem === banner || $0.secondItem === banner }
+            .forEach { $0.isActive = false }
+
+        let anchor: NSLayoutConstraint
+        switch position {
+        case .top:
+            anchor = banner.topAnchor.constraint(
+                equalTo: superview.safeAreaLayoutGuide.topAnchor)
+        case .bottom:
+            anchor = banner.bottomAnchor.constraint(
+                equalTo: superview.safeAreaLayoutGuide.bottomAnchor)
+        }
+
+        NSLayoutConstraint.activate([
+            banner.centerXAnchor.constraint(equalTo: superview.centerXAnchor),
+            anchor,
+        ])
+    }
+
+    /// Returns the key window's root view controller for the first connected scene.
+    @MainActor private func keyRootViewController() -> UIViewController? {
+        guard
+            let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+            let window = windowScene.keyWindow ?? windowScene.windows.first
+        else {
+            logger.error("keyRootViewController: no UIWindowScene / window available.")
+            return nil
+        }
+        return window.rootViewController
+    }
+
+    /// Resets the initialising flag on both the actor-isolated and mirror copies.
+    @MainActor private func finishInitializing() {
+        setInitializing(false)
+    }
+
+    /// Runs the full consent info update + form presentation flow with a timeout.
+    @MainActor private func runConsentFlow(
+        parameters: RequestParameters, from rootViewController: UIViewController,
+        startTime: ContinuousClock.Instant
+    ) async {
+        let result = await withTimeout(consentTimeoutSeconds) { [weak self] in
+            guard let self else { return }
+
+            await withCheckedContinuation { continuation in
+                ConsentInformation.shared.requestConsentInfoUpdate(
+                    with: parameters
+                ) { [weak self] error in
+                    guard let self else { continuation.resume(); return }
+
+                    if let error {
+                        self.logger.error(
+                            "Consent info update failed: \(error.localizedDescription, privacy: .public)"
+                        )
+                        Task { @MainActor in
+                            self.finishInitializing()
+                            on_consent_gathered(error.localizedDescription)
+                        }
+                        continuation.resume()
+                        return
+                    }
+
+                    Task { @MainActor in
+                        self.refreshConsentMirrors()
+
+                        let status = ConsentInformation.shared.consentStatus
+                        let formStatus = ConsentInformation.shared.formStatus
+                        let elapsed = ContinuousClock.now - startTime
+
+                        self.logger.debug(
+                            "[init step 2/4] Consent info updated (\(elapsed)). "
+                                + "consentStatus=\(consentStatusName(status), privacy: .public) "
+                                + "formStatus=\(formStatusName(formStatus), privacy: .public) "
+                                + "canRequestAds=\(self._canRequestAds)"
+                        )
+
+                        await self.handleConsentResult(
+                            from: rootViewController, startTime: startTime)
+                        continuation.resume()
+                    }
+                }
+            }
+        }
+
+        if result == .timedOut {
+            logger.error(
+                "Consent info update timed out after \(self.consentTimeoutSeconds) — proceeding without consent."
+            )
+            finishInitializing()
+            on_consent_gathered("Timeout")
+        }
+    }
+
+    /// After the UMP info update completes, decide whether to show the consent form,
+    /// skip it, and when to proceed to MobileAds initialisation.
+    @MainActor private func handleConsentResult(
+        from rootViewController: UIViewController,
+        startTime: ContinuousClock.Instant
+    ) async {
+        let status = ConsentInformation.shared.consentStatus
+
+        if _canRequestAds {
+            // Consent was previously granted (or not required). Skip the form.
+            logger.debug(
+                "Consent already granted (status=\(consentStatusName(status), privacy: .public)) — proceeding to SDK init."
+            )
+            on_consent_gathered("")
+            logIABTCFConsentStrings()
+            await startMobileAdsSdk(startTime: startTime)
+            return
+        }
+
+        switch status {
+        case .required:
+            // First-run or stale consent: load and present the form if needed.
+            let formStatus = ConsentInformation.shared.formStatus
+            logger.debug(
+                "[init step 3/4] Consent required — loading UMP form. "
+                    + "formStatus=\(formStatusName(formStatus), privacy: .public)"
+            )
+            do {
+                try await ConsentForm.loadAndPresentIfRequired(from: rootViewController)
+                refreshConsentMirrors()
+                logger.debug(
+                    "UMP form dismissed. canRequestAds=\(self._canRequestAds)")
+                logIABTCFConsentStrings()
+
+                if _canRequestAds {
+                    on_consent_gathered("")
+                    await startMobileAdsSdk(startTime: startTime)
+                } else {
+                    logger.warning("User did not grant consent.")
+                    finishInitializing()
+                    on_consent_gathered("User did not grant consent")
+                }
+            } catch {
+                logger.error("UMP form error: \(error.localizedDescription, privacy: .public)")
+                finishInitializing()
+                on_consent_gathered(error.localizedDescription)
+            }
+
+        case .notRequired:
+            // Outside a region that requires explicit consent — ads are allowed.
+            logger.debug("Consent not required in this region — proceeding to SDK init.")
+            on_consent_gathered("")
+            logIABTCFConsentStrings()
+            await startMobileAdsSdk(startTime: startTime)
+
+        case .obtained:
+            // canRequestAds was false even though consent is obtained. This means the
+            // user gave limited consent (e.g. rejected personalised ads). The SDK will
+            // serve non-personalised ads only. Report the limitation to the Rust side
+            // so it can react (e.g. hide personalisation-dependent features).
+            logger.warning(
+                "Consent obtained but canRequestAds=false — ads will be limited. "
+                    + "Proceeding to SDK init."
+            )
+            logIABTCFConsentStrings()
+            on_consent_gathered("limited")
+            await startMobileAdsSdk(startTime: startTime)
+
+        case .unknown:
+            fallthrough
+        @unknown default:
+            logger.error(
+                "Unexpected consent status (\(consentStatusName(status), privacy: .public)) — cannot initialise ads."
+            )
+            finishInitializing()
+            on_consent_gathered("Unexpected consent status: \(consentStatusName(status))")
+        }
+    }
+
+    /// Requests ATT authorisation (iOS 14+) then starts the Google Mobile Ads SDK.
+    /// ATT is requested *after* the UMP consent flow as recommended by Google/Apple.
+    @MainActor private func startMobileAdsSdk(startTime: ContinuousClock.Instant) async {
+        let attStatus = await requestTrackingAuthorizationIfNeeded()
+
+        let elapsed = ContinuousClock.now - startTime
+        logger.debug("[init step 4/4] Starting MobileAds SDK… (\(elapsed) since init start)")
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            MobileAds.shared.start { [weak self] status in
+                guard let self else { continuation.resume(); return }
+                Task { @MainActor in
+                    self.setInitialized(true)
+                    self.finishInitializing()
+                    self.refreshConsentMirrors()
+
+                    // Log only adapters that are not yet ready — avoid dumping
+                    // the full dictionary which produces an unreadable blob.
+                    let notReady = status.adapterStatusesByClassName
+                        .filter { $0.value.state != .ready }
+                        .map { "\($0.key): \($0.value.state.rawValue)" }
+                    if notReady.isEmpty {
+                        self.logger.debug("MobileAds SDK started — all adapters ready.")
+                    } else {
+                        self.logger.warning(
+                            "MobileAds SDK started — adapters not ready: \(notReady.joined(separator: ", "), privacy: .public)"
+                        )
+                    }
+
+                    // Final summary log for the entire initialisation flow.
+                    let totalElapsed = ContinuousClock.now - startTime
+                    let consentStatus = ConsentInformation.shared.consentStatus
+                    var attSummary = "n/a"
+                    if #available(iOS 14, *) {
+                        attSummary = attStatus.map { attStatusName($0) } ?? "skipped"
+                    }
+                    self.logger.info(
+                        "AdMob init complete (\(totalElapsed)). "
+                            + "consent=\(consentStatusName(consentStatus), privacy: .public) "
+                            + "ATT=\(attSummary, privacy: .public) "
+                            + "canRequestAds=\(self._canRequestAds) "
+                            + "privacyOptionsRequired=\(self._isPrivacyOptionsRequired)"
+                    )
+
+                    on_initialized(true)
+                    continuation.resume()
+                }
+            }
+        }
+    }
+
+    /// Requests ATT tracking authorisation on iOS 14+ and logs the outcome.
+    /// Returns the resulting ATT status, or `nil` if ATT is unavailable.
+    @MainActor private func requestTrackingAuthorizationIfNeeded()
+        async -> ATTrackingManager.AuthorizationStatus?
+    {
+        guard #available(iOS 14, *) else { return nil }
+
+        let status = await ATTrackingManager.requestTrackingAuthorization()
+        switch status {
+        case .authorized:
+            logger.debug(
+                "ATT: authorized. IDFA=\(ASIdentifierManager.shared().advertisingIdentifier.uuidString, privacy: .private)"
+            )
+        case .denied:
+            logger.warning("ATT: denied — personalised ads unavailable.")
+        case .restricted:
+            logger.warning("ATT: restricted — personalised ads unavailable.")
+        case .notDetermined:
+            // .notDetermined after requestTrackingAuthorization() is anomalous —
+            // the call is supposed to block until the user responds.
+            logger.error(
+                "ATT: returned .notDetermined after requestTrackingAuthorization — unexpected, IDFA unavailable."
+            )
+        @unknown default:
+            logger.warning("ATT: unknown status (\(status.rawValue)).")
+        }
+        return status
+    }
+
+    /// Runs `operation` with a deadline. Returns `.timedOut` if the deadline was hit
+    /// before `operation` completed, `.completed` otherwise.
+    private func withTimeout(_ duration: Duration, operation: @escaping @Sendable () async -> Void)
+        async -> TimeoutResult
+    {
+        await withTaskGroup(of: TimeoutResult.self) { group in
+            group.addTask {
+                await operation()
+                return .completed
+            }
+            group.addTask {
+                try? await Task.sleep(for: duration)
+                return .timedOut
+            }
+            // The first task to finish wins; cancel the other.
+            let first = await group.next() ?? .timedOut
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// Logs a consistent message when an ad operation is skipped because the SDK
+    /// is not ready or consent has not been granted.
+    private func logNotReady(context: String) {
+        if !_isInitialized {
+            logger.warning("\(context, privacy: .public): AdMob SDK not yet initialised.")
+        } else if !_canRequestAds {
+            logger.warning("\(context, privacy: .public): ads blocked — consent not granted.")
+        } else {
+            logger.warning(
+                "\(context, privacy: .public): ads blocked — unknown reason (initialized=\(_isInitialized), canRequestAds=\(_canRequestAds))."
+            )
+        }
+    }
+
+    /// Logs the IAB TCF 2.0 consent strings stored in UserDefaults by the UMP SDK.
+    /// These are essential for debugging why specific ad networks refuse to serve ads.
+    private func logIABTCFConsentStrings() {
+        let defaults = UserDefaults.standard
+        let gdprApplies = defaults.integer(forKey: "IABTCF_gdprApplies")
+        let tcString = defaults.string(forKey: "IABTCF_TCString") ?? "(not set)"
+        let purposeConsents = defaults.string(forKey: "IABTCF_PurposeConsents") ?? "(not set)"
+        let vendorConsents = defaults.string(forKey: "IABTCF_VendorConsents") ?? "(not set)"
+
+        logger.debug(
+            "IABTCF: gdprApplies=\(gdprApplies) "
+                + "TCString=\(tcString, privacy: .private) "
+                + "PurposeConsents=\(purposeConsents, privacy: .public) "
+                + "VendorConsents=\(vendorConsents, privacy: .private)"
+        )
     }
 }
 
-// MARK: - GADBannerViewDelegate
+// MARK: - BannerViewDelegate
+
 extension AdMobManager: BannerViewDelegate {
     public func bannerViewDidReceiveAd(_ bannerView: BannerViewDelegate) {
-        print("Banner ad loaded successfully")
+        logger.debug("Banner ad loaded successfully.")
+        Task { @MainActor in
+            self.setBannerLoaded(true)
+        }
         on_ad_loaded("banner")
     }
 
     public func bannerView(
         _ bannerView: BannerViewDelegate, didFailToReceiveAdWithError error: Error
     ) {
-        print("Banner ad failed to load: \(error.localizedDescription)")
+        logger.error("Banner ad failed to load: \(error.localizedDescription, privacy: .public)")
+        Task { @MainActor in
+            self.setBannerLoaded(false)
+        }
         on_ad_failed_to_load("banner", error.localizedDescription)
     }
 
     public func bannerViewWillPresentScreen(_ bannerView: BannerViewDelegate) {
-        print("Banner ad will present screen")
+        logger.debug("Banner ad will present screen.")
         on_ad_opened("banner")
     }
 
     public func bannerViewWillDismissScreen(_ bannerView: BannerViewDelegate) {
-        print("Banner ad will dismiss screen")
+        logger.debug("Banner ad will dismiss screen.")
     }
 
     public func bannerViewDidDismissScreen(_ bannerView: BannerViewDelegate) {
-        print("Banner ad did dismiss screen")
+        logger.debug("Banner ad did dismiss screen.")
         on_ad_closed("banner")
     }
 }
 
-// MARK: - GADFullScreenContentDelegate
+// MARK: - FullScreenContentDelegate
+
 extension AdMobManager: FullScreenContentDelegate {
     public func ad(
         ad_f: FullScreenPresentingAd, didFailToPresentFullScreenContentWithError error: Error
     ) {
-        let adType = (ad_f is InterstitialAd) ? "interstitial" : "rewarded"
-        print("\(adType) ad failed to present: \(error.localizedDescription)")
-        on_ad_failed_to_load(adType, error.localizedDescription)
+        let adType = adTypeName(ad_f)
+        let unitID = adUnitID(for: ad_f)
+        logger.error(
+            "\(adType, privacy: .public) ad (\(unitID, privacy: .public)) failed to present: \(error.localizedDescription, privacy: .public)"
+        )
+        // This is a *presentation* failure, not a *load* failure. Use the distinct
+        // callback so the Rust side can handle it differently (e.g. not auto-reload).
+        on_ad_failed_to_present(adType, error.localizedDescription)
     }
 
     public func adWillPresentFullScreenContent(ad_f: FullScreenPresentingAd) {
-        let adType = (ad_f is InterstitialAd) ? "interstitial" : "rewarded"
-        print("\(adType) ad will present")
+        let adType = adTypeName(ad_f)
+        logger.debug("\(adType, privacy: .public) ad will present.")
         on_ad_opened(adType)
     }
 
     public func adDidDismissFullScreenContent(ad_f: FullScreenPresentingAd) {
-        let adType = (ad_f is InterstitialAd) ? "interstitial" : "rewarded"
-        print("\(adType) ad did dismiss")
+        let adType = adTypeName(ad_f)
+        let unitID = adUnitID(for: ad_f)
+        logger.debug("\(adType, privacy: .public) ad (\(unitID, privacy: .public)) dismissed.")
         on_ad_closed(adType)
 
-        // Clear the ad reference
-        if ad is InterstitialAd {
-            self.interstitialAd = nil
-        } else if ad is RewardedAd {
-            self.rewardedAd = nil
+        // Clear the reference so is_*_ready() returns false and a new ad can be loaded.
+        Task { @MainActor in
+            if ad_f is InterstitialAd {
+                self.interstitialAd = nil
+                self.lastInterstitialUnitID = nil
+                self.setHasInterstitial(false)
+            } else if ad_f is RewardedAd {
+                self.rewardedAd = nil
+                self.lastRewardedUnitID = nil
+                self.setHasRewarded(false)
+            }
         }
+    }
+
+    private func adTypeName(_ ad: FullScreenPresentingAd) -> String {
+        return (ad is InterstitialAd) ? "interstitial" : "rewarded"
+    }
+
+    /// Returns the ad unit ID for the given fullscreen ad, if tracked.
+    @MainActor private func adUnitID(for ad: FullScreenPresentingAd) -> String {
+        if ad is InterstitialAd {
+            return lastInterstitialUnitID ?? "?"
+        } else if ad is RewardedAd {
+            return lastRewardedUnitID ?? "?"
+        }
+        return "?"
     }
 }

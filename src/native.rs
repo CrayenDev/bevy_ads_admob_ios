@@ -19,20 +19,24 @@ mod ffi {
 
         fn initialize_admob(self: &AdMobManager, test_device_id: &str) -> bool;
         fn load_banner_ad(self: &AdMobManager, ad_unit_id: &str, width: i32, height: i32) -> bool;
-        fn show_banner_ad(self: &AdMobManager) -> bool;
+        fn show_banner_ad(self: &AdMobManager, position: i32) -> bool;
         fn hide_banner_ad(self: &AdMobManager) -> bool;
         fn load_interstitial_ad(self: &AdMobManager, ad_unit_id: &str) -> bool;
         fn show_interstitial_ad(self: &AdMobManager) -> bool;
         fn load_rewarded_ad(self: &AdMobManager, ad_unit_id: &str) -> bool;
         fn show_rewarded_ad(self: &AdMobManager) -> bool;
+        fn is_banner_ready(self: &AdMobManager) -> bool;
         fn is_interstitial_ready(self: &AdMobManager) -> bool;
         fn is_rewarded_ready(self: &AdMobManager) -> bool;
+        fn is_privacy_options_required(self: &AdMobManager) -> bool;
+        fn show_privacy_options_form(self: &AdMobManager) -> bool;
     }
 
     extern "Rust" {
         fn on_initialized(success: bool);
         fn on_ad_loaded(ad_type: String);
         fn on_ad_failed_to_load(ad_type: String, error: String);
+        fn on_ad_failed_to_present(ad_type: String, error: String);
         fn on_ad_opened(ad_type: String);
         fn on_ad_closed(ad_type: String);
         fn on_rewarded_ad_earned_reward(amount: i32, type_name: String);
@@ -55,10 +59,18 @@ pub fn on_ad_loaded(ad_type: String) {
 }
 
 pub fn on_ad_failed_to_load(ad_type: String, error: String) {
-    bevy_log::info!("Ad failed to load: {} - {}", ad_type, error);
+    bevy_log::error!("Ad failed to load: {} - {}", ad_type, error);
     let ad_type: Option<AdType> = ad_type.as_str().try_into().ok();
     if let Some(ad_type) = ad_type {
         bevy_ads_common::write_event_to_queue(AdMessage::AdFailedToLoad { ad_type, error });
+    }
+}
+
+pub fn on_ad_failed_to_present(ad_type: String, error: String) {
+    bevy_log::error!("Ad failed to present: {} - {}", ad_type, error);
+    let ad_type: Option<AdType> = ad_type.as_str().try_into().ok();
+    if let Some(ad_type) = ad_type {
+        bevy_ads_common::write_event_to_queue(AdMessage::AdFailedToPresent { ad_type, error });
     }
 }
 
@@ -88,7 +100,11 @@ pub fn on_rewarded_ad_earned_reward(amount: i32, reward_type: String) {
 
 pub fn on_consent_gathered(error: String) {
     let success = error.is_empty();
-    bevy_log::info!("Consent gathered: {}", error);
+    if success {
+        bevy_log::info!("Consent gathered successfully");
+    } else {
+        bevy_log::warn!("Consent gathered with issue: {}", error);
+    }
     bevy_ads_common::write_event_to_queue(AdMessage::ConsentGathered { error, success });
 }
 
@@ -114,19 +130,16 @@ impl AdMobNative {
     }
 
     pub fn initialize(&self, test_device_id: Option<&str>) -> bool {
-        let id = match test_device_id {
-            Some(id) => id,
-            None => "",
-        };
-        self.manager.initialize_admob(id)
+        self.manager
+            .initialize_admob(test_device_id.unwrap_or_default())
     }
 
     pub fn load_banner_ad(&self, ad_unit_id: &str, width: i32, height: i32) -> bool {
         self.manager.load_banner_ad(ad_unit_id, width, height)
     }
 
-    pub fn show_banner_ad(&self) -> bool {
-        self.manager.show_banner_ad()
+    pub fn show_banner_ad(&self, position: i32) -> bool {
+        self.manager.show_banner_ad(position)
     }
 
     pub fn hide_banner_ad(&self) -> bool {
@@ -149,11 +162,23 @@ impl AdMobNative {
         self.manager.show_rewarded_ad()
     }
 
+    pub fn is_banner_ready(&self) -> bool {
+        self.manager.is_banner_ready()
+    }
+
     pub fn is_interstitial_ready(&self) -> bool {
         self.manager.is_interstitial_ready()
     }
 
     pub fn is_rewarded_ready(&self) -> bool {
         self.manager.is_rewarded_ready()
+    }
+
+    pub fn is_privacy_options_required(&self) -> bool {
+        self.manager.is_privacy_options_required()
+    }
+
+    pub fn show_privacy_options_form(&self) -> bool {
+        self.manager.show_privacy_options_form()
     }
 }
