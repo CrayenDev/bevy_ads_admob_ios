@@ -396,7 +396,7 @@ impl Plugin for AdMobPlugin {
         if !app.is_plugin_added::<bevy_ads_common::AdsCommonPlugin>() {
             app.add_plugins(bevy_ads_common::AdsCommonPlugin);
         }
-        app.init_non_send_resource::<AdMobManager>()
+        app.init_non_send::<AdMobManager>()
             .add_systems(
                 Update,
                 initialize_admob.run_if(resource_added::<AdMobConfig>),
