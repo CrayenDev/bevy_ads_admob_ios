@@ -850,36 +850,37 @@ private enum TimeoutResult {
 }
 
 // MARK: - BannerViewDelegate
+//
+// Every delegate method below must match the Objective-C selector of the Google Mobile
+// Ads protocol exactly (unlabelled first parameter, `BannerView` / `FullScreenPresentingAd`
+// types). The requirements are optional, so a near miss compiles without error but is
+// never called.
 
 extension AdMobManager: BannerViewDelegate {
-    public func bannerViewDidReceiveAd(_ bannerView: BannerViewDelegate) {
+    @MainActor public func bannerViewDidReceiveAd(_ bannerView: BannerView) {
         logger.debug("Banner ad loaded successfully.")
-        Task { @MainActor in
-            self.setBannerLoaded(true)
-        }
+        setBannerLoaded(true)
         on_ad_loaded("banner")
     }
 
-    public func bannerView(
-        _ bannerView: BannerViewDelegate, didFailToReceiveAdWithError error: Error
+    @MainActor public func bannerView(
+        _ bannerView: BannerView, didFailToReceiveAdWithError error: Error
     ) {
         logger.error("Banner ad failed to load: \(error.localizedDescription, privacy: .public)")
-        Task { @MainActor in
-            self.setBannerLoaded(false)
-        }
+        setBannerLoaded(false)
         on_ad_failed_to_load("banner", error.localizedDescription)
     }
 
-    public func bannerViewWillPresentScreen(_ bannerView: BannerViewDelegate) {
+    @MainActor public func bannerViewWillPresentScreen(_ bannerView: BannerView) {
         logger.debug("Banner ad will present screen.")
         on_ad_opened("banner")
     }
 
-    public func bannerViewWillDismissScreen(_ bannerView: BannerViewDelegate) {
+    @MainActor public func bannerViewWillDismissScreen(_ bannerView: BannerView) {
         logger.debug("Banner ad will dismiss screen.")
     }
 
-    public func bannerViewDidDismissScreen(_ bannerView: BannerViewDelegate) {
+    @MainActor public func bannerViewDidDismissScreen(_ bannerView: BannerView) {
         logger.debug("Banner ad did dismiss screen.")
         on_ad_closed("banner")
     }
@@ -888,51 +889,48 @@ extension AdMobManager: BannerViewDelegate {
 // MARK: - FullScreenContentDelegate
 
 extension AdMobManager: FullScreenContentDelegate {
-    public func ad(
-        ad_f: FullScreenPresentingAd, didFailToPresentFullScreenContentWithError error: Error
+    @MainActor public func ad(
+        _ ad: FullScreenPresentingAd, didFailToPresentFullScreenContentWithError error: Error
     ) {
-        let adType = adTypeName(ad_f)
-        let unitID = adUnitID(for: ad_f)
+        let adType = adTypeName(ad)
+        let unitID = adUnitID(for: ad)
         logger.error(
             "\(adType, privacy: .public) ad (\(unitID, privacy: .public)) failed to present: \(error.localizedDescription, privacy: .public)"
         )
         // This is a *presentation* failure, not a *load* failure. Use the distinct
         // callback so the Rust side can handle it differently (e.g. not auto-reload).
         // The overlay window is no longer needed since the ad failed to appear.
-        Task { @MainActor in
-            self.dismissOverlayWindow()
-        }
+        dismissOverlayWindow()
         on_ad_failed_to_present(adType, error.localizedDescription)
     }
 
-    public func adWillPresentFullScreenContent(ad_f: FullScreenPresentingAd) {
-        let adType = adTypeName(ad_f)
+    @MainActor public func adWillPresentFullScreenContent(_ ad: FullScreenPresentingAd) {
+        let adType = adTypeName(ad)
         logger.debug("\(adType, privacy: .public) ad will present.")
         on_ad_opened(adType)
     }
 
-    public func adDidDismissFullScreenContent(ad_f: FullScreenPresentingAd) {
-        let adType = adTypeName(ad_f)
-        let unitID = adUnitID(for: ad_f)
+    @MainActor public func adDidDismissFullScreenContent(_ ad: FullScreenPresentingAd) {
+        let adType = adTypeName(ad)
+        let unitID = adUnitID(for: ad)
         logger.debug("\(adType, privacy: .public) ad (\(unitID, privacy: .public)) dismissed.")
-        on_ad_closed(adType)
 
-        // Clear the reference so is_*_ready() returns false and a new ad can be loaded.
+        // Clear the reference before reporting the close, so is_*_ready() is already
+        // false when the game reacts to it and a new ad can be loaded.
         // Also release the overlay window — it is no longer needed until the next ad.
-        Task { @MainActor in
-            if ad_f is InterstitialAd {
-                self.interstitialAd = nil
-                self.lastInterstitialUnitID = nil
-                self._lastInterstitialUnitID = nil
-                self.setHasInterstitial(false)
-            } else if ad_f is RewardedAd {
-                self.rewardedAd = nil
-                self.lastRewardedUnitID = nil
-                self._lastRewardedUnitID = nil
-                self.setHasRewarded(false)
-            }
-            self.dismissOverlayWindow()
+        if ad is InterstitialAd {
+            interstitialAd = nil
+            lastInterstitialUnitID = nil
+            _lastInterstitialUnitID = nil
+            setHasInterstitial(false)
+        } else if ad is RewardedAd {
+            rewardedAd = nil
+            lastRewardedUnitID = nil
+            _lastRewardedUnitID = nil
+            setHasRewarded(false)
         }
+        dismissOverlayWindow()
+        on_ad_closed(adType)
     }
 
     private func adTypeName(_ ad: FullScreenPresentingAd) -> String {
