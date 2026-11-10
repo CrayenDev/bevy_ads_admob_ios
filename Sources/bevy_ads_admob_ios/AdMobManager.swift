@@ -50,12 +50,31 @@ private func attStatusName(_ status: ATTrackingManager.AuthorizationStatus) -> S
     }
 }
 
-// MARK: - Timeout helper result
+// MARK: - Consent info update result
 
-/// Outcome of the `withTimeout` utility.
-private enum TimeoutResult {
-    case completed
+/// Outcome of the UMP consent info update, the only timed phase of the consent flow.
+private enum ConsentUpdate {
+    case updated
+    case failed(String)
     case timedOut
+}
+
+/// Resumes a continuation once: the update's callback and its timeout race for it.
+private final class ResumeOnce<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Never>?
+
+    init(_ continuation: CheckedContinuation<T, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ value: T) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
+    }
 }
 
 // MARK: - AdMobManager
@@ -565,62 +584,73 @@ private enum TimeoutResult {
         setInitializing(false)
     }
 
-    /// Runs the full consent info update + form presentation flow with a timeout.
+    /// Runs the consent flow: the info update, then the form and the SDK start.
+    ///
+    /// Only the info update is timed. A consent form on screen is the player reading
+    /// it: however long that takes, its answer is reported and starts the SDK.
     @MainActor private func runConsentFlow(
         parameters: RequestParameters, from rootViewController: UIViewController,
         startTime: ContinuousClock.Instant
     ) async {
-        let result = await withTimeout(consentTimeoutSeconds) { [weak self] in
-            guard let self else { return }
-            await self.requestConsentInfoUpdate(
-                parameters: parameters, from: rootViewController, startTime: startTime)
-        }
+        switch await requestConsentInfoUpdate(parameters: parameters) {
+        case .updated:
+            refreshConsentMirrors()
 
-        if result == .timedOut {
-            logger.error(
-                "Consent info update timed out after \(self.consentTimeoutSeconds) — proceeding without consent."
+            let status = ConsentInformation.shared.consentStatus
+            let formStatus = ConsentInformation.shared.formStatus
+            let elapsed = ContinuousClock.now - startTime
+
+            logger.debug(
+                "[init step 2/4] Consent info updated (\(elapsed)). consentStatus=\(consentStatusName(status), privacy: .public) formStatus=\(formStatusName(formStatus), privacy: .public) canRequestAds=\(self._canRequestAds)"
             )
+
+            await handleConsentResult(from: rootViewController, startTime: startTime)
+
+        case .failed(let message):
+            logger.error("Consent info update failed: \(message, privacy: .public)")
+            // Nothing was presented: release the overlay window, which would
+            // otherwise stay above the game.
+            dismissOverlayWindow()
             finishInitializing()
+            on_consent_gathered(message)
+
+        case .timedOut:
+            refreshConsentMirrors()
+            dismissOverlayWindow()
             on_consent_gathered("Timeout")
+            if _canRequestAds {
+                // Consent from an earlier session still stands.
+                logger.warning(
+                    "Consent info update timed out after \(self.consentTimeoutSeconds) — starting with the stored consent."
+                )
+                await startMobileAdsSdk(startTime: startTime)
+            } else {
+                // Too late for a form (it would land mid-game); it comes next launch.
+                logger.error(
+                    "Consent info update timed out after \(self.consentTimeoutSeconds) — no ads this session."
+                )
+                finishInitializing()
+            }
         }
     }
 
-    /// Wraps `ConsentInformation.requestConsentInfoUpdate` in a checked continuation
-    /// so the caller can `await` its completion.
-    private func requestConsentInfoUpdate(
-        parameters: RequestParameters, from rootViewController: UIViewController,
-        startTime: ContinuousClock.Instant
-    ) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            ConsentInformation.shared.requestConsentInfoUpdate(with: parameters) { [weak self] error in
-                guard let self else { continuation.resume(); return }
-
+    /// Wraps `ConsentInformation.requestConsentInfoUpdate` in a continuation that
+    /// resumes once: with the update's result, or after `consentTimeoutSeconds`.
+    private func requestConsentInfoUpdate(parameters: RequestParameters) async -> ConsentUpdate {
+        let timeout = consentTimeoutSeconds
+        return await withCheckedContinuation {
+            (continuation: CheckedContinuation<ConsentUpdate, Never>) in
+            let once = ResumeOnce(continuation)
+            ConsentInformation.shared.requestConsentInfoUpdate(with: parameters) { error in
                 if let error {
-                    self.logger.error(
-                        "Consent info update failed: \(error.localizedDescription, privacy: .public)"
-                    )
-                    Task { @MainActor in
-                        self.finishInitializing()
-                        on_consent_gathered(error.localizedDescription)
-                    }
-                    continuation.resume()
-                    return
+                    once.resume(.failed(error.localizedDescription))
+                } else {
+                    once.resume(.updated)
                 }
-
-                Task { @MainActor in
-                    self.refreshConsentMirrors()
-
-                    let status = ConsentInformation.shared.consentStatus
-                    let formStatus = ConsentInformation.shared.formStatus
-                    let elapsed = ContinuousClock.now - startTime
-
-                    self.logger.debug(
-                        "[init step 2/4] Consent info updated (\(elapsed)). consentStatus=\(consentStatusName(status), privacy: .public) formStatus=\(formStatusName(formStatus), privacy: .public) canRequestAds=\(self._canRequestAds)"
-                    )
-
-                    await self.handleConsentResult(from: rootViewController, startTime: startTime)
-                    continuation.resume()
-                }
+            }
+            Task {
+                try? await Task.sleep(for: timeout)
+                once.resume(.timedOut)
             }
         }
     }
@@ -711,8 +741,9 @@ private enum TimeoutResult {
         }
     }
 
-    /// Requests ATT authorisation (iOS 14+) then starts the Google Mobile Ads SDK.
-    /// ATT is requested *after* the UMP consent flow as recommended by Google/Apple.
+    /// Requests ATT authorisation (iOS 14+) where that is still due, then starts the
+    /// Google Mobile Ads SDK. ATT comes *after* the UMP consent flow as recommended by
+    /// Google/Apple, and not at all right after a refusal there (`shouldRequestATT`).
     @MainActor private func startMobileAdsSdk(startTime: ContinuousClock.Instant) async {
         let attStatus = await requestTrackingAuthorizationIfNeeded()
 
@@ -770,12 +801,42 @@ private enum TimeoutResult {
         on_initialized(true)
     }
 
-    /// Requests ATT tracking authorisation on iOS 14+ and logs the outcome.
-    /// Returns the resulting ATT status, or `nil` if ATT is unavailable.
+    /// Whether Apple's tracking prompt is still due after the UMP flow.
+    ///
+    /// Not when it was answered before (UMP's IDFA explainer asks it too). And not
+    /// when GDPR applies and the player has not agreed to storing or reading
+    /// information on the device (TCF purpose 1, the first character of
+    /// `IABTCF_PurposeConsents`): asking to track right after a "no" in Google's form
+    /// asks the same thing twice, which App Review rejects (5.1.1).
+    @available(iOS 14, *)
+    static func shouldRequestATT(
+        status: ATTrackingManager.AuthorizationStatus, gdprApplies: Bool, purposeConsents: String?
+    ) -> Bool {
+        guard status == .notDetermined else { return false }
+        guard gdprApplies else { return true }
+        return purposeConsents?.first == "1"
+    }
+
+    /// Requests ATT tracking authorisation on iOS 14+ where it is still due and logs
+    /// the outcome. Returns the resulting ATT status, or `nil` if ATT is unavailable.
     @MainActor private func requestTrackingAuthorizationIfNeeded()
         async -> ATTrackingManager.AuthorizationStatus?
     {
         guard #available(iOS 14, *) else { return nil }
+
+        let current = ATTrackingManager.trackingAuthorizationStatus
+        let defaults = UserDefaults.standard
+        let gdprApplies = defaults.integer(forKey: "IABTCF_gdprApplies") == 1
+        let purposeConsents = defaults.string(forKey: "IABTCF_PurposeConsents")
+        guard
+            Self.shouldRequestATT(
+                status: current, gdprApplies: gdprApplies, purposeConsents: purposeConsents)
+        else {
+            logger.debug(
+                "ATT: not asked (status=\(attStatusName(current), privacy: .public) gdprApplies=\(gdprApplies))."
+            )
+            return current
+        }
 
         let status = await ATTrackingManager.requestTrackingAuthorization()
         switch status {
@@ -797,27 +858,6 @@ private enum TimeoutResult {
             logger.warning("ATT: unknown status (\(status.rawValue)).")
         }
         return status
-    }
-
-    /// Runs `operation` with a deadline. Returns `.timedOut` if the deadline was hit
-    /// before `operation` completed, `.completed` otherwise.
-    private func withTimeout(_ duration: Duration, operation: @escaping @Sendable () async -> Void)
-        async -> TimeoutResult
-    {
-        await withTaskGroup(of: TimeoutResult.self) { group in
-            group.addTask {
-                await operation()
-                return .completed
-            }
-            group.addTask {
-                try? await Task.sleep(for: duration)
-                return .timedOut
-            }
-            // The first task to finish wins; cancel the other.
-            let first = await group.next() ?? .timedOut
-            group.cancelAll()
-            return first
-        }
     }
 
     /// Logs a consistent message when an ad operation is skipped because the SDK
